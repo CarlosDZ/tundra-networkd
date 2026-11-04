@@ -1,3 +1,7 @@
+#include "load.h"
+#include "loop.h"
+
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -10,6 +14,15 @@ int main(int argc, char *argv[]) {
 		printf("tundra-networkd %s\n", TUNDRA_NETWORKD_VERSION);
 		return 0;
 	}
-	usage();
-	return 2;
+	if (argc != 1) {
+		usage();
+		return 2;
+	}
+
+	static struct config cfg;
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	signal(SIGPIPE, SIG_IGN);
+	if (conf_load(TUNDRA_NETWORKD_CONF_DIR, &cfg) < 0)
+		return 1;
+	return loop_run(&cfg);
 }

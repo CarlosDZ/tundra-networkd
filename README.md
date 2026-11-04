@@ -35,3 +35,7 @@ make check
 - `check` runs the unit tests and then the network scenarios
   (`tests/net/t-*.sh`) in network namespaces. They need root (the runner
   re-executes itself with `sudo`), `iproute2` and `dnsmasq`.
+- The DHCP scenarios run the test build of `tundra-dhcpc` found at
+  `../tundra-dhcpc/build/test/tundra-dhcpc` (its own `make check` leaves it
+  there), or the binary in `DHCPC_REAL`. The others use a fake dhcpc built from
+  `tests/tools/dhcpc-fake.c`.

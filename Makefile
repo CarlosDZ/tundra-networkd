@@ -9,6 +9,7 @@ TUNDRA_BLUEICE_ARP_PATH ?= /usr/bin/tundra-blueice-arp
 TUNDRA_NETWORKD_CONF_DIR ?= /etc/tundra/network
 TUNDRA_NETWORKD_RUN_DIR ?= /run/tundra/network
 TUNDRA_NETWORKD_SOCKET ?= /run/tundra/network.socket
+TUNDRA_NETWORKD_SYSFS ?= /sys/class/net
 
 TUNDRA_STD  = -std=c11
 TUNDRA_DEFS = -D_GNU_SOURCE -DTUNDRA_NETWORKD_VERSION=\"$(VERSION)\" \
@@ -17,7 +18,8 @@ TUNDRA_DEFS = -D_GNU_SOURCE -DTUNDRA_NETWORKD_VERSION=\"$(VERSION)\" \
               -DTUNDRA_BLUEICE_ARP_PATH=\"$(TUNDRA_BLUEICE_ARP_PATH)\" \
               -DTUNDRA_NETWORKD_CONF_DIR=\"$(TUNDRA_NETWORKD_CONF_DIR)\" \
               -DTUNDRA_NETWORKD_RUN_DIR=\"$(TUNDRA_NETWORKD_RUN_DIR)\" \
-              -DTUNDRA_NETWORKD_SOCKET=\"$(TUNDRA_NETWORKD_SOCKET)\"
+              -DTUNDRA_NETWORKD_SOCKET=\"$(TUNDRA_NETWORKD_SOCKET)\" \
+              -DTUNDRA_NETWORKD_SYSFS=\"$(TUNDRA_NETWORKD_SYSFS)\"
 TUNDRA_INC  = -Isrc -Isrc/conf -Isrc/net
 
 CFLAGS ?= -Wall -Wextra -O2
@@ -52,11 +54,12 @@ TEST_BIN = $(TEST_BUILD)/tundra-networkd
 TEST_TOOLS = $(patsubst tests/tools/%.c,$(TEST_BUILD)/tools/%,$(wildcard tests/tools/*.c))
 TEST_DEFS = -D_GNU_SOURCE -DTUNDRA_NETWORKD_VERSION=\"$(VERSION)-test\" \
             -DTUNDRA_IP_PATH=\"$(TUNDRA_IP_PATH)\" \
-            -DTUNDRA_DHCPC_PATH=\"$(TUNDRA_DHCPC_PATH)\" \
+            -DTUNDRA_DHCPC_PATH=\"$(CURDIR)/$(TEST_BUILD)/tools/dhcpc-fake\" \
             -DTUNDRA_BLUEICE_ARP_PATH=\"$(TUNDRA_BLUEICE_ARP_PATH)\" \
             -DTUNDRA_NETWORKD_CONF_DIR=\"$(CURDIR)/$(TEST_BUILD)/conf\" \
             -DTUNDRA_NETWORKD_RUN_DIR=\"$(CURDIR)/$(TEST_BUILD)/run\" \
-            -DTUNDRA_NETWORKD_SOCKET=\"$(CURDIR)/$(TEST_BUILD)/run/network.socket\"
+            -DTUNDRA_NETWORKD_SOCKET=\"$(CURDIR)/$(TEST_BUILD)/run/network.socket\" \
+            -DTUNDRA_NETWORKD_SYSFS=\"$(CURDIR)/$(TEST_BUILD)/sys\"
 
 $(TEST_BIN): FORCE
 	@mkdir -p $(dir $@)
