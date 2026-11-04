@@ -2,8 +2,11 @@
 #include "core.h"
 #include "files.h"
 #include "lease.h"
+#include "leaseinfo.h"
 #include "link.h"
+#include "proto.h"
 #include "resolv.h"
+#include "server.h"
 #include "spawn.h"
 
 #include <errno.h>
@@ -29,6 +32,9 @@
 #define T_LINK 2
 #define T_LEASE 3
 #define T_CHILD 4
+#define T_LISTEN 5
+#define T_CLIENT 6
+#define REPLY_MAX 512
 
 struct child {
 	int used;
@@ -41,6 +47,12 @@ struct child {
 	size_t len;
 };
 
+struct conn_view {
+	int connected;
+	char profile[PROFILE_NAME_MAX + 1];
+	char address[LEASEINFO_ADDR_MAX];
+};
+
 struct daemon {
 	struct config *cfg;
 	struct core core;
@@ -49,7 +61,9 @@ struct daemon {
 	int lfd;
 	int ifd;
 	struct child kids[CHILDREN_MAX];
-	int dns_dirty;
+	struct server srv;
+	struct conn_view view[CORE_IFACES];
+	int dirty;
 	int dns_written;
 	char dns[RESOLV_TEXT_MAX];
 };
@@ -178,12 +192,12 @@ static void execute(struct daemon *d, struct actions *acts) {
 		switch (a->type) {
 		case A_SPAWN_DHCPC:
 			spawn_dhcpc(d, a);
-			d->dns_dirty = 1;
+			d->dirty = 1;
 			break;
 		case A_SIGNAL:
 			if ((k = running_child(d, a->iface)))
 				kill(k->pid, a->sig);
-			d->dns_dirty = 1;
+			d->dirty = 1;
 			break;
 		case A_LOG:
 			printf("networkd: %s\n", a->msg);
@@ -225,7 +239,7 @@ static void on_lease(struct daemon *d) {
 	struct lease_ev evs[LEASE_EVENTS_MAX];
 	int n = lease_watch_read(d->ifd, evs, LEASE_EVENTS_MAX);
 	if (n > 0)
-		d->dns_dirty = 1;
+		d->dirty = 1;
 	for (int i = 0; i < n; i++) {
 		for (int j = 0; j < CHILDREN_MAX; j++) {
 			struct child *k = &d->kids[j];
@@ -251,7 +265,7 @@ static void reap(struct daemon *d) {
 				continue;
 			drain(d, k);
 			k->reaped = 1;
-			d->dns_dirty = 1;
+			d->dirty = 1;
 			struct actions acts = {0};
 			char ifname[IF_NAMESIZE];
 			snprintf(ifname, sizeof(ifname), "%s", k->ifname);
@@ -309,23 +323,7 @@ static void log_dns(const char *text) {
 	printf("networkd: dns:%s\n", used ? line : " none");
 }
 
-static void update_dns(struct daemon *d) {
-	struct resolv_src src[CORE_IFACES];
-	int n = 0;
-	d->dns_dirty = 0;
-	for (int i = 0; i < d->core.n; i++) {
-		const struct core_iface *ci = &d->core.ifs[i];
-		char lease[LEASE_FILE_MAX];
-		size_t len;
-		if (ci->st != C_RUNNING ||
-		    read_lease(ci->name, ci->profile, lease, sizeof(lease), &len) < 0)
-			continue;
-		if (resolv_source(ci->name, find_profile(d->cfg, ci->profile),
-		                  ifaces_find(&d->cfg->ifaces, ci->name), lease, len,
-		                  &src[n]) == 0)
-			n++;
-	}
-
+static void write_dns(struct daemon *d, struct resolv_src *src, int n) {
 	char text[RESOLV_TEXT_MAX];
 	if (resolv_build(src, n, text, sizeof(text)) < 0 ||
 	    (d->dns_written && strcmp(text, d->dns) == 0))
@@ -342,6 +340,140 @@ static void update_dns(struct daemon *d) {
 	log_dns(text);
 }
 
+static void emit(struct daemon *d, int connected, const char *ifname,
+                 const struct conn_view *v) {
+	char line[REPLY_MAX];
+	if (proto_event(connected, ifname, v->profile, v->address, line,
+	                sizeof(line)) >= 0)
+		server_broadcast(&d->srv, line);
+}
+
+static void refresh(struct daemon *d) {
+	struct resolv_src src[CORE_IFACES];
+	int n = 0;
+	d->dirty = 0;
+	for (int i = 0; i < d->core.n; i++) {
+		const struct core_iface *ci = &d->core.ifs[i];
+		struct conn_view *v = &d->view[i];
+		struct conn_view now = {0};
+		struct lease_info li;
+		char lease[LEASE_FILE_MAX];
+		size_t len;
+		if (ci->st == C_RUNNING &&
+		    read_lease(ci->name, ci->profile, lease, sizeof(lease), &len) ==
+		        0 &&
+		    leaseinfo_parse(lease, len, &li) == 0) {
+			now.connected = 1;
+			snprintf(now.profile, sizeof(now.profile), "%s", ci->profile);
+			leaseinfo_address(&li, now.address);
+			if (resolv_source(ci->name, find_profile(d->cfg, ci->profile),
+			                  ifaces_find(&d->cfg->ifaces, ci->name), &li,
+			                  &src[n]) == 0)
+				n++;
+		}
+		int same = v->connected == now.connected &&
+		           strcmp(v->profile, now.profile) == 0 &&
+		           strcmp(v->address, now.address) == 0;
+		if (!same && v->connected)
+			emit(d, 0, ci->name, v);
+		if (!same && now.connected)
+			emit(d, 1, ci->name, &now);
+		*v = now;
+	}
+	write_dns(d, src, n);
+}
+
+static void reply_status(struct daemon *d, int client) {
+	char line[REPLY_MAX], why[CONF_ERR_MAX + 16];
+	for (int i = 0; i < d->core.n; i++) {
+		const struct core_iface *ci = &d->core.ifs[i];
+		const char *err = core_unmanaged(&d->core, ci->name);
+		struct iface_view v = {
+		    .ci = ci,
+		    .p = ci->st == C_IDLE ? NULL : find_profile(d->cfg, ci->profile),
+		    .connected = d->view[i].connected,
+		    .address = d->view[i].connected ? d->view[i].address : NULL,
+		};
+		if (err) {
+			snprintf(why, sizeof(why), "interfaces: %s", err);
+			v.unmanaged = why;
+		}
+		if (ci->present || ci->st == C_WAIT_LINK)
+			if (proto_status(&v, line, sizeof(line)) >= 0)
+				server_send(&d->srv, client, line);
+	}
+	server_send(&d->srv, client, "OK");
+}
+
+static void reply_profiles(struct daemon *d, int client) {
+	char line[REPLY_MAX];
+	for (int i = 0; i < d->cfg->n; i++)
+		if (proto_profile(&d->cfg->profiles[i], line, sizeof(line)) >= 0)
+			server_send(&d->srv, client, line);
+	server_send(&d->srv, client, "OK");
+}
+
+static const char *do_connect(struct daemon *d, const struct cmd *cmd) {
+	const struct profile *p = find_profile(d->cfg, cmd->args[0]);
+	const char *ifname = cmd->nargs > 1 ? cmd->args[1] : NULL;
+	struct actions acts = {0};
+	if (p && p->valid && !ifname) {
+		if (p->any_interface)
+			return "ERROR interface required";
+		ifname = p->interface;
+	}
+	enum connect_result r = core_connect(&d->core, cmd->args[0],
+	                                     ifname ? ifname : "", now_ms(), &acts);
+	execute(d, &acts);
+	return proto_connect_error(r);
+}
+
+static void on_command(void *ctx, int client, const char *line) {
+	struct daemon *d = ctx;
+	struct actions acts = {0};
+	struct cmd cmd;
+	const char *err;
+	proto_parse(line, &cmd);
+	switch (cmd.type) {
+	case CMD_EMPTY:
+		return;
+	case CMD_BAD:
+		server_send(&d->srv, client, cmd.error);
+		return;
+	case CMD_STATUS:
+		reply_status(d, client);
+		return;
+	case CMD_PROFILES:
+		reply_profiles(d, client);
+		return;
+	case CMD_CONNECT:
+		err = do_connect(d, &cmd);
+		server_send(&d->srv, client, err ? err : "OK");
+		return;
+	case CMD_DISCONNECT:
+		if (core_disconnect(&d->core, cmd.args[0], now_ms(), &acts) < 0) {
+			server_send(&d->srv, client, "ERROR no such interface");
+			return;
+		}
+		execute(d, &acts);
+		server_send(&d->srv, client, "OK");
+		return;
+	case CMD_RELOAD:
+		server_send(&d->srv, client, "ERROR reload is not implemented yet");
+		return;
+	case CMD_SUBSCRIBE:
+		d->srv.c[client].subscribed = 1;
+		server_send(&d->srv, client, "OK");
+		return;
+	case CMD_ALERTS:
+		server_send(&d->srv, client, "OK");
+		return;
+	case CMD_ALERT_REPLY:
+		server_send(&d->srv, client, "ERROR unknown alert");
+		return;
+	}
+}
+
 static int on_signal(struct daemon *d) {
 	struct signalfd_siginfo si;
 	struct actions acts = {0};
@@ -356,7 +488,7 @@ static int on_signal(struct daemon *d) {
 		default:
 			printf("networkd: received %s, stopping\n",
 			       strsignal((int)si.ssi_signo));
-			core_shutdown(&d->core, &acts);
+			core_shutdown(&d->core, now_ms(), &acts);
 			execute(d, &acts);
 			break;
 		}
@@ -406,7 +538,7 @@ int loop_run(struct config *cfg) {
 	for (int i = 0; i < CHILDREN_MAX; i++)
 		d.kids[i].fd = -1;
 	core_init(&d.core, cfg);
-	d.dns_dirty = 1;
+	d.dirty = 1;
 	report_config(cfg);
 
 	d.ep = epoll_create1(EPOLL_CLOEXEC);
@@ -417,12 +549,18 @@ int loop_run(struct config *cfg) {
 	    watch_fd(&d, d.sfd, (uint64_t)T_SIGNAL << 32) < 0 ||
 	    watch_fd(&d, d.lfd, (uint64_t)T_LINK << 32) < 0 ||
 	    watch_fd(&d, d.ifd, (uint64_t)T_LEASE << 32) < 0 ||
-	    link_dump(d.lfd) < 0)
+	    server_open(&d.srv, TUNDRA_NETWORKD_SOCKET, d.ep,
+	                (uint64_t)T_LISTEN << 32, (uint64_t)T_CLIENT << 32) < 0 ||
+	    link_dump(d.lfd) < 0) {
+		server_close(&d.srv);
 		return 1;
+	}
 
 	for (;;) {
-		if (core_done(&d.core))
+		if (core_done(&d.core)) {
+			server_close(&d.srv);
 			return 0;
+		}
 
 		uint64_t now = now_ms();
 		uint64_t next = core_next_deadline(&d.core);
@@ -436,6 +574,7 @@ int loop_run(struct config *cfg) {
 			if (errno == EINTR)
 				continue;
 			perror("epoll_wait error");
+			server_close(&d.srv);
 			return 1;
 		}
 
@@ -448,14 +587,24 @@ int loop_run(struct config *cfg) {
 			uint32_t idx = (uint32_t)evs[i].data.u64;
 			if (type == T_SIGNAL)
 				on_signal(&d);
-			else if (type == T_LINK && on_link(&d) < 0)
+			else if (type == T_LINK && on_link(&d) < 0) {
+				server_close(&d.srv);
 				return 1;
-			else if (type == T_LEASE)
+			} else if (type == T_LEASE)
 				on_lease(&d);
 			else if (type == T_CHILD && idx < CHILDREN_MAX && d.kids[idx].used)
 				drain(&d, &d.kids[idx]);
+			else if (type == T_LISTEN)
+				server_accept(&d.srv);
+			else if (type == T_CLIENT && idx < SERVER_CLIENTS) {
+				if (evs[i].events & (EPOLLOUT | EPOLLHUP | EPOLLERR))
+					server_output(&d.srv, (int)idx);
+				if (evs[i].events & EPOLLIN)
+					server_input(&d.srv, (int)idx, on_command, &d);
+				d.dirty = 1;
+			}
 		}
-		if (d.dns_dirty && !d.core.shutting_down)
-			update_dns(&d);
+		if (d.dirty && !d.core.shutting_down)
+			refresh(&d);
 	}
 }

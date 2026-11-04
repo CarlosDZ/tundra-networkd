@@ -9,6 +9,26 @@ runs what the profiles and the user ask for.
 DNS goes to `/run/tundra/network/resolv.conf` and nowhere else: link
 `/etc/resolv.conf` to it to follow the active connections.
 
+## Control socket
+
+`/run/tundra/network.socket`, `0660 root:network` (`0600 root:root` while that
+group does not exist). One command per line; each one answers `OK` or
+`ERROR <reason>`, and lists end with `OK`.
+
+| Command | Answer |
+|---------|--------|
+| `STATUS` | One `iface` line per interface |
+| `PROFILES` | One `profile` line per profile, in load order |
+| `CONNECT <profile> [interface]` | The interface is required for `interface = *` |
+| `DISCONNECT <interface>` | Releases the lease |
+| `SUBSCRIBE` | From then on, `event connected` and `event disconnected` lines |
+
+```
+iface enp8s0 state connected profile casa address 10.79.0.100/24 trusted no
+profile casa interface enp8s0 autoconnect yes trusted no
+event connected enp8s0 casa address 10.79.0.100/24
+```
+
 ## Requirements
 
 - Linux.

@@ -13,6 +13,7 @@
 #define BACKOFF_MIN_MS 1000
 #define BACKOFF_MAX_MS 60000
 #define STABLE_MS 60000
+#define STOP_TIMEOUT_MS 5000
 
 enum conn_state {
 	C_IDLE,
@@ -37,6 +38,7 @@ struct core_iface {
 	unsigned int backoff_ms;
 	uint64_t started_at;
 	uint64_t retry_at;
+	uint64_t stop_at;
 };
 
 struct core {
@@ -88,10 +90,12 @@ void core_timer(struct core *c, uint64_t now, struct actions *out);
 enum connect_result core_connect(struct core *c, const char *profile,
                                  const char *ifname, uint64_t now,
                                  struct actions *out);
-int core_disconnect(struct core *c, const char *ifname, struct actions *out);
-void core_shutdown(struct core *c, struct actions *out);
+int core_disconnect(struct core *c, const char *ifname, uint64_t now,
+                    struct actions *out);
+void core_shutdown(struct core *c, uint64_t now, struct actions *out);
 int core_done(const struct core *c);
 uint64_t core_next_deadline(const struct core *c);
+const char *core_unmanaged(const struct core *c, const char *ifname);
 const struct core_iface *core_find(const struct core *c, const char *ifname);
 
 #endif

@@ -92,6 +92,8 @@ int main(int argc, char *argv[]) {
 	}
 
 	struct sigaction sa = {.sa_handler = on_signal};
+	if (strcmp(mode, "stubborn") == 0)
+		sa.sa_handler = SIG_IGN;
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGUSR1, &sa, NULL);
 	printf("fake running\n");

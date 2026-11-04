@@ -58,7 +58,7 @@ TEST_DEFS = -D_GNU_SOURCE -DTUNDRA_NETWORKD_VERSION=\"$(VERSION)-test\" \
             -DTUNDRA_BLUEICE_ARP_PATH=\"$(TUNDRA_BLUEICE_ARP_PATH)\" \
             -DTUNDRA_NETWORKD_CONF_DIR=\"$(CURDIR)/$(TEST_BUILD)/conf\" \
             -DTUNDRA_NETWORKD_RUN_DIR=\"$(CURDIR)/$(TEST_BUILD)/run\" \
-            -DTUNDRA_NETWORKD_SOCKET=\"$(CURDIR)/$(TEST_BUILD)/run/network.socket\" \
+            -DTUNDRA_NETWORKD_SOCKET=\"/run/tundra-test/network.socket\" \
             -DTUNDRA_NETWORKD_SYSFS=\"$(CURDIR)/$(TEST_BUILD)/sys\"
 
 $(TEST_BIN): FORCE

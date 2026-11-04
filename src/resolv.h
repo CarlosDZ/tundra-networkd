@@ -2,6 +2,7 @@
 #define TUNDRA_RESOLV_H
 
 #include "ifaces.h"
+#include "leaseinfo.h"
 #include "profile.h"
 
 #include <net/if.h>
@@ -17,9 +18,8 @@ struct resolv_src {
 	int n;
 };
 
-int resolv_lease_dns(const char *text, size_t len, uint32_t ns[DNS_MAX]);
 int resolv_source(const char *ifname, const struct profile *p,
-                  const struct iface_conf *conf, const char *lease, size_t len,
+                  const struct iface_conf *conf, const struct lease_info *li,
                   struct resolv_src *out);
 int resolv_build(struct resolv_src *src, int n, char *out, size_t size);
 

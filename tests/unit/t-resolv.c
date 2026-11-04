@@ -1,4 +1,5 @@
 #include "files.c"
+#include "leaseinfo.c"
 #include "resolv.c"
 #include "test.h"
 
@@ -27,10 +28,19 @@ static int built(struct resolv_src *s, int n, const char *expect) {
 	       strcmp(out, expect) == 0;
 }
 
+static struct lease_info li;
+
 static int lease_dns(const char *text, int expect_n, const char *first) {
-	uint32_t ns[DNS_MAX];
-	int n = resolv_lease_dns(text, strlen(text), ns);
-	return n == expect_n && (!first || ns[0] == ip(first));
+	leaseinfo_parse(text, strlen(text), &li);
+	return li.ndns == expect_n && (!first || li.dns[0] == ip(first));
+}
+
+static int lease_addr(const char *text, const char *expect) {
+	char a[LEASEINFO_ADDR_MAX];
+	if (leaseinfo_parse(text, strlen(text), &li) < 0)
+		return expect == NULL;
+	leaseinfo_address(&li, a);
+	return expect && strcmp(a, expect) == 0;
 }
 
 static char dir[] = "/tmp/tnd-resolv.XXXXXX";
@@ -60,32 +70,41 @@ int main(void) {
 	CHECK(lease_dns("dns=10.0.0.1,nope\n", 0, NULL),
 	      "a malformed dns line gives no servers");
 	CHECK(lease_dns("dnsx=10.0.0.1\n", 0, NULL), "only the dns key counts");
+	CHECK(lease_addr("address=10.79.0.100\nmask=255.255.255.0\n",
+	                 "10.79.0.100/24"),
+	      "address and mask give the prefix");
+	CHECK(lease_addr("address=10.0.0.1\nmask=255.255.255.255\n", "10.0.0.1/32"),
+	      "a /32 lease");
+	CHECK(lease_addr("mask=255.255.255.0\ndns=10.0.0.1\n", NULL),
+	      "a lease without address is rejected");
+	CHECK(lease_addr("address=10.0.0.1\nmask=255.0.255.0\n", NULL),
+	      "a non contiguous mask is rejected");
+	CHECK(lease_addr("address=10.0.0.1\n", NULL),
+	      "a lease without mask is rejected");
 
 	struct profile p = {.dns = DNS_LEASE};
 	struct iface_conf conf = {.has_metric = 1, .metric = 300};
 	struct resolv_src r;
-	const char *lease = "dns=10.0.0.1\n";
-	CHECK(resolv_source("tnd0", &p, &conf, NULL, 0, &r) < 0,
+	struct lease_info lease = {.ndns = 1, .dns = {ip("10.0.0.1")}};
+	CHECK(resolv_source("tnd0", &p, &conf, NULL, &r) < 0,
 	      "no lease, no source");
-	CHECK(resolv_source("tnd0", NULL, &conf, lease, strlen(lease), &r) < 0,
+	CHECK(resolv_source("tnd0", NULL, &conf, &lease, &r) < 0,
 	      "an unknown profile is no source");
-	CHECK(resolv_source("tnd0", &p, &conf, lease, strlen(lease), &r) == 0 &&
+	CHECK(resolv_source("tnd0", &p, &conf, &lease, &r) == 0 &&
 	          r.metric == 300 && r.n == 1 && r.ns[0] == ip("10.0.0.1") &&
 	          strcmp(r.ifname, "tnd0") == 0,
 	      "dns = lease takes the servers of the lease");
-	CHECK(resolv_source("tnd0", &p, NULL, lease, strlen(lease), &r) == 0 &&
-	          r.metric == 0,
+	CHECK(resolv_source("tnd0", &p, NULL, &lease, &r) == 0 && r.metric == 0,
 	      "an interface without metric counts as 0");
 	p.dns = DNS_LIST;
 	p.ndns = 2;
 	p.dns_list[0] = ip("9.9.9.9");
 	p.dns_list[1] = ip("1.1.1.1");
-	CHECK(resolv_source("tnd0", &p, &conf, lease, strlen(lease), &r) == 0 &&
-	          r.n == 2 && r.ns[0] == ip("9.9.9.9"),
+	CHECK(resolv_source("tnd0", &p, &conf, &lease, &r) == 0 && r.n == 2 &&
+	          r.ns[0] == ip("9.9.9.9"),
 	      "a dns list replaces the lease");
 	p.dns = DNS_NONE;
-	CHECK(resolv_source("tnd0", &p, &conf, lease, strlen(lease), &r) == 0 &&
-	          r.n == 0,
+	CHECK(resolv_source("tnd0", &p, &conf, &lease, &r) == 0 && r.n == 0,
 	      "dns = none is a source without servers");
 
 	struct resolv_src s[4];

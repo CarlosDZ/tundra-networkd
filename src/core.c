@@ -88,6 +88,13 @@ static int matches(const struct profile *p, const struct core_iface *ci) {
 	return strcmp(p->interface, ci->name) == 0;
 }
 
+static void begin_stop(struct core_iface *ci, int sig, uint64_t now,
+                       struct actions *out) {
+	ci->st = C_STOPPING;
+	ci->stop_at = now + STOP_TIMEOUT_MS;
+	signal_child(out, ci, sig);
+}
+
 static void spawn(struct core *c, struct core_iface *ci,
                   const struct profile *p, uint64_t now, struct actions *out) {
 	const struct iface_conf *conf;
@@ -266,6 +273,12 @@ void core_timer(struct core *c, uint64_t now, struct actions *out) {
 		struct core_iface *ci = &c->ifs[i];
 		if (ci->st == C_BACKOFF && now >= ci->retry_at)
 			resume(c, ci, now, out);
+		if (ci->st == C_STOPPING && ci->stop_at && now >= ci->stop_at) {
+			ci->stop_at = 0;
+			signal_child(out, ci, SIGKILL);
+			log_msg(out, ci, "tundra-dhcpc did not stop in %u s, killed",
+			        STOP_TIMEOUT_MS / 1000);
+		}
 	}
 }
 
@@ -296,8 +309,7 @@ enum connect_result core_connect(struct core *c, const char *profile,
 		if (strcmp(ci->profile, p->name) == 0)
 			return CONNECT_OK;
 		snprintf(ci->pending, sizeof(ci->pending), "%s", p->name);
-		ci->st = C_STOPPING;
-		signal_child(out, ci, SIGUSR1);
+		begin_stop(ci, SIGUSR1, now, out);
 		return CONNECT_OK;
 	case C_STOPPING:
 		snprintf(ci->pending, sizeof(ci->pending), "%s", p->name);
@@ -315,7 +327,8 @@ enum connect_result core_connect(struct core *c, const char *profile,
 	return CONNECT_OK;
 }
 
-int core_disconnect(struct core *c, const char *ifname, struct actions *out) {
+int core_disconnect(struct core *c, const char *ifname, uint64_t now,
+                    struct actions *out) {
 	struct core_iface *ci = find(c, ifname);
 	if (!ci)
 		return -1;
@@ -323,8 +336,7 @@ int core_disconnect(struct core *c, const char *ifname, struct actions *out) {
 	ci->pending[0] = '\0';
 	switch (ci->st) {
 	case C_RUNNING:
-		ci->st = C_STOPPING;
-		signal_child(out, ci, SIGUSR1);
+		begin_stop(ci, SIGUSR1, now, out);
 		break;
 	case C_BACKOFF:
 	case C_WAIT_LINK:
@@ -338,13 +350,12 @@ int core_disconnect(struct core *c, const char *ifname, struct actions *out) {
 	return 0;
 }
 
-void core_shutdown(struct core *c, struct actions *out) {
+void core_shutdown(struct core *c, uint64_t now, struct actions *out) {
 	c->shutting_down = 1;
 	for (int i = 0; i < c->n; i++) {
 		struct core_iface *ci = &c->ifs[i];
 		if (ci->st == C_RUNNING) {
-			ci->st = C_STOPPING;
-			signal_child(out, ci, SIGTERM);
+			begin_stop(ci, SIGTERM, now, out);
 		} else if (ci->st == C_BACKOFF || ci->st == C_WAIT_LINK) {
 			ci->st = C_IDLE;
 		}
@@ -365,5 +376,16 @@ uint64_t core_next_deadline(const struct core *c) {
 	for (int i = 0; i < c->n; i++)
 		if (c->ifs[i].st == C_BACKOFF && c->ifs[i].retry_at < next)
 			next = c->ifs[i].retry_at;
+		else if (c->ifs[i].st == C_STOPPING && c->ifs[i].stop_at &&
+		         c->ifs[i].stop_at < next)
+			next = c->ifs[i].stop_at;
 	return next;
+}
+
+const char *core_unmanaged(const struct core *c, const char *ifname) {
+	const struct core_iface *ci = core_find(c, ifname);
+	const struct iface_conf *conf;
+	if (!ci || managed(c, ci, &conf))
+		return NULL;
+	return conf ? conf->error : c->cfg->ifaces.error;
 }

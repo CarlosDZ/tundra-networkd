@@ -17,6 +17,7 @@ WORK=$(mktemp -d /tmp/tnd-test.XXXXXX)
 LOG=$WORK/networkd.log
 LEASES=/run/tundra/dhcpc
 SENSOR_HISTORY=/run/tundra/blueice/arp
+SOCK=/run/tundra-test/network.socket
 DHCPC_FAKE_DIR=$WORK/fake
 DHCPC_REAL=${DHCPC_REAL:-$ROOT/../tundra-dhcpc/build/test/tundra-dhcpc}
 export DHCPC_FAKE_DIR DHCPC_REAL
@@ -26,6 +27,7 @@ FAIL=0
 DNSMASQ_PID=
 DAEMON_PID=
 DAEMON_EXIT=
+EV_PID=
 
 ok() {
 	PASS=$((PASS + 1))
@@ -194,6 +196,36 @@ child_pid() {
 		"$LOG" | tail -n 1
 }
 
+cmd() {
+	"$TOOLS/ctl" "$SOCK" "$*"
+}
+
+reply_is() {
+	_want=$1
+	shift
+	[ "$(cmd "$@")" = "$_want" ]
+}
+
+status_has() {
+	cmd STATUS | grep -qx -- "$1"
+}
+
+subscribe() {
+	"$TOOLS/ctl" -f "$SOCK" SUBSCRIBE >"$WORK/events" 2>&1 &
+	EV_PID=$!
+}
+
+unsubscribe() {
+	[ -n "$EV_PID" ] || return 0
+	kill "$EV_PID" 2>/dev/null
+	wait "$EV_PID" 2>/dev/null
+	EV_PID=
+}
+
+has_event() {
+	grep -qx -- "$1" "$WORK/events"
+}
+
 add_if() {
 	_if=${1:-$IF}
 	ip link add "$_if" type veth peer name "${_if}p"
@@ -221,6 +253,7 @@ kill_ns() {
 }
 
 teardown_net() {
+	unsubscribe
 	kill_daemon
 	stop_dnsmasq
 	kill_ns "$NS"
@@ -229,7 +262,7 @@ teardown_net() {
 	ip link del "${IF2}p" 2>/dev/null
 	ip link del "${EVIF}p" 2>/dev/null
 	ip link del "$BR" 2>/dev/null
-	rm -rf "$CONF" "$RUN" "$SYS" "$DHCPC_FAKE_DIR"
+	rm -rf "$CONF" "$RUN" "$SYS" "$DHCPC_FAKE_DIR" "$(dirname "$SOCK")"
 	rm -f "$LEASES/$IF".lease "$LEASES/$IF"-*.lease "$LEASES/$IF2"-*.lease
 	rm -f "$SENSOR_HISTORY/$IF" "$SENSOR_HISTORY/$IF.lock"
 	return 0

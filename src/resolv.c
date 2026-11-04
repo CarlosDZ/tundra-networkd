@@ -5,45 +5,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-int resolv_lease_dns(const char *text, size_t len, uint32_t ns[DNS_MAX]) {
-	const char *end = text + len;
-	for (const char *line = text; line < end;) {
-		const char *nl = memchr(line, '\n', (size_t)(end - line));
-		const char *stop = nl ? nl : end;
-		if (stop - line > 4 && strncmp(line, "dns=", 4) == 0) {
-			int n = 0;
-			for (const char *tok = line + 4; tok < stop && n < DNS_MAX;) {
-				const char *comma = memchr(tok, ',', (size_t)(stop - tok));
-				const char *tend = comma ? comma : stop;
-				char buf[INET_ADDRSTRLEN];
-				struct in_addr a;
-				size_t tlen = (size_t)(tend - tok);
-				if (tlen == 0 || tlen >= sizeof(buf))
-					return 0;
-				memcpy(buf, tok, tlen);
-				buf[tlen] = '\0';
-				if (inet_pton(AF_INET, buf, &a) != 1)
-					return 0;
-				ns[n++] = a.s_addr;
-				tok = tend + 1;
-			}
-			return n;
-		}
-		line = stop + 1;
-	}
-	return 0;
-}
-
 int resolv_source(const char *ifname, const struct profile *p,
-                  const struct iface_conf *conf, const char *lease, size_t len,
+                  const struct iface_conf *conf, const struct lease_info *li,
                   struct resolv_src *out) {
-	if (!p || !lease)
+	if (!p || !li)
 		return -1;
 	memset(out, 0, sizeof(*out));
 	snprintf(out->ifname, sizeof(out->ifname), "%s", ifname);
 	out->metric = conf && conf->has_metric ? conf->metric : 0;
 	if (p->dns == DNS_LEASE) {
-		out->n = resolv_lease_dns(lease, len, out->ns);
+		out->n = li->ndns;
+		memcpy(out->ns, li->dns, sizeof(out->ns));
 	} else if (p->dns == DNS_LIST) {
 		out->n = p->ndns;
 		memcpy(out->ns, p->dns_list, sizeof(out->ns));

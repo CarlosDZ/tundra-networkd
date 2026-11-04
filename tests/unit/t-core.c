@@ -235,7 +235,7 @@ static void test_user(void) {
 	core_link(&c, "tnd0", 1, 0, &out);
 
 	out.n = 0;
-	CHECK(core_disconnect(&c, "tnd0", &out) == 0 && count(A_SIGNAL) == 1 &&
+	CHECK(core_disconnect(&c, "tnd0", 50, &out) == 0 && count(A_SIGNAL) == 1 &&
 	          find_act(A_SIGNAL)->sig == SIGUSR1 && st("tnd0") == C_STOPPING,
 	      "DISCONNECT releases with SIGUSR1");
 	core_child_exit(&c, "tnd0", EXITED(0), 100, &out);
@@ -266,7 +266,7 @@ static void test_user(void) {
 	profile_parse(&cfg.profiles[cfg.n++], "40-bad", bad, strlen(bad), 0);
 	CHECK(core_connect(&c, "40-bad", "tnd0", 0, &out) == CONNECT_INVALID,
 	      "CONNECT with an invalid profile");
-	CHECK(core_disconnect(&c, "tnd9", &out) < 0,
+	CHECK(core_disconnect(&c, "tnd9", 0, &out) < 0,
 	      "DISCONNECT on an unknown interface");
 }
 
@@ -279,7 +279,7 @@ static void test_shutdown(void) {
 	core_child_exit(&c, "tnd1", EXITED(1), 10, &out);
 
 	out.n = 0;
-	core_shutdown(&c, &out);
+	core_shutdown(&c, 15, &out);
 	CHECK(count(A_SIGNAL) == 1 && find_act(A_SIGNAL)->sig == SIGTERM &&
 	          !core_done(&c),
 	      "shutdown sends SIGTERM to every running tundra-dhcpc");
@@ -287,6 +287,47 @@ static void test_shutdown(void) {
 	core_child_exit(&c, "tnd0", EXITED(0), 20, &out);
 	CHECK(count(A_SPAWN_DHCPC) == 0 && core_done(&c),
 	      "nothing is relaunched and the core is done");
+}
+
+static void test_stop_timeout(void) {
+	reset("");
+	add("10-a", "tnd0", AUTO);
+	add("20-b", "tnd0", MANUAL);
+	core_link(&c, "tnd0", 1, 0, &out);
+	core_disconnect(&c, "tnd0", 1000, &out);
+	CHECK(core_next_deadline(&c) == 1000 + STOP_TIMEOUT_MS,
+	      "a stop has a deadline");
+	out.n = 0;
+	core_timer(&c, 1000 + STOP_TIMEOUT_MS - 1, &out);
+	CHECK(count(A_SIGNAL) == 0, "no kill before the deadline");
+	core_timer(&c, 1000 + STOP_TIMEOUT_MS, &out);
+	CHECK(count(A_SIGNAL) == 1 && find_act(A_SIGNAL)->sig == SIGKILL &&
+	          logged("did not stop in 5 s, killed"),
+	      "SIGKILL once the 5 s are over");
+	out.n = 0;
+	core_timer(&c, 1000 + 2 * STOP_TIMEOUT_MS, &out);
+	CHECK(count(A_SIGNAL) == 0 && core_next_deadline(&c) == UINT64_MAX,
+	      "a single SIGKILL");
+	core_child_exit(&c, "tnd0", SIGKILL, 7000, &out);
+	CHECK(st("tnd0") == C_IDLE && count(A_SPAWN_DHCPC) == 0,
+	      "the killed child ends the stop");
+
+	out.n = 0;
+	core_connect(&c, "10-a", "tnd0", 8000, &out);
+	core_connect(&c, "20-b", "tnd0", 9000, &out);
+	CHECK(core_next_deadline(&c) == 9000 + STOP_TIMEOUT_MS,
+	      "switching profile has the same deadline");
+	core_timer(&c, 9000 + STOP_TIMEOUT_MS, &out);
+	core_child_exit(&c, "tnd0", SIGKILL, 9000 + STOP_TIMEOUT_MS, &out);
+	CHECK(st("tnd0") == C_RUNNING &&
+	          strcmp(core_find(&c, "tnd0")->profile, "20-b") == 0,
+	      "and the new profile starts after the kill");
+
+	out.n = 0;
+	core_shutdown(&c, 20000, &out);
+	core_timer(&c, 20000 + STOP_TIMEOUT_MS, &out);
+	CHECK(count(A_SIGNAL) == 2 && out.a[out.n - 2].sig == SIGKILL,
+	      "the shutdown has the same deadline");
 }
 
 int main(void) {
@@ -297,5 +338,6 @@ int main(void) {
 	test_link_gone();
 	test_user();
 	test_shutdown();
+	test_stop_timeout();
 	return test_summary();
 }
