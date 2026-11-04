@@ -19,6 +19,9 @@
 #define SENSOR_DOWN_LEVEL 5
 #define ALERT_ALL_LEVEL 9
 #define TRUST_LEVEL 6
+#define STATIC_TAKEN_LEVEL 2
+#define STATIC_FAIL (-1)
+#define STATIC_USAGE (-2)
 #define ACCEPTS_MAX 8
 
 enum conn_state {
@@ -27,12 +30,15 @@ enum conn_state {
 	C_STOPPING,
 	C_BACKOFF,
 	C_WAIT_LINK,
-	C_BLOCKED
+	C_BLOCKED,
+	C_PROBING,
+	C_STATIC
 };
 
 enum sensor_state { S_OFF, S_RUNNING, S_STOPPING, S_BACKOFF };
-enum child_kind { K_DHCPC, K_SENSOR };
-enum block_reason { B_NONE, B_CONFIG, B_EXITED, B_ALERT, B_UNSUPPORTED };
+enum child_kind { K_DHCPC, K_SENSOR, K_PROBE };
+enum probe_result { PROBE_NONE, PROBE_FREE, PROBE_TAKEN };
+enum block_reason { B_NONE, B_CONFIG, B_EXITED, B_ALERT, B_TAKEN };
 
 struct accept {
 	char kase[ALERT_TOKEN_MAX + 1];
@@ -48,6 +54,7 @@ struct core_iface {
 	char pending[PROFILE_NAME_MAX + 1];
 	int manual_off;
 	enum block_reason blocked;
+	enum child_kind stop_kind;
 	unsigned int backoff_ms;
 	uint64_t started_at;
 	uint64_t retry_at;
@@ -84,7 +91,16 @@ struct core {
 	unsigned int lockdown_id;
 };
 
-enum act_type { A_SPAWN_DHCPC, A_SPAWN_SENSOR, A_SIGNAL, A_LOG, A_ALERT };
+enum act_type {
+	A_SPAWN_DHCPC,
+	A_SPAWN_SENSOR,
+	A_SPAWN_PROBE,
+	A_STATIC_APPLY,
+	A_STATIC_REMOVE,
+	A_SIGNAL,
+	A_LOG,
+	A_ALERT
+};
 
 struct action {
 	enum act_type type;
@@ -98,6 +114,7 @@ struct action {
 	char table[TABLE_MAX + 1];
 	unsigned int grace_ms;
 	uint32_t addr;
+	int prefix;
 	uint32_t gw;
 	int probe_off;
 	int defend_always;
@@ -141,7 +158,13 @@ void core_shutdown(struct core *c, uint64_t now, struct actions *out);
 void core_lease(struct core *c, const char *ifname, uint32_t addr, uint32_t gw,
                 uint64_t now, struct actions *out);
 void core_sensor_exit(struct core *c, const char *ifname, int status,
-                      int conflict, uint64_t now, struct actions *out);
+                      const char *conflict_mac, uint64_t now,
+                      struct actions *out);
+void core_probe_exit(struct core *c, const char *ifname, int status,
+                     enum probe_result result, const char *mac, const char *src,
+                     uint64_t now, struct actions *out);
+void core_static_result(struct core *c, const char *ifname, int rc,
+                        uint64_t now, struct actions *out);
 void core_stop(struct core *c, const char *ifname, int level, unsigned int id,
                uint64_t now, struct actions *out);
 void core_note_alert(struct core *c, const char *ifname, int level,

@@ -1,5 +1,6 @@
 #include "core.h"
 
+#include <arpa/inet.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -30,11 +31,18 @@ static void log_msg(struct actions *out, const struct core_iface *ci,
 	snprintf(a->msg, sizeof(a->msg), "%s: %s", ci->name, msg);
 }
 
+static void child_signal(struct actions *out, const struct core_iface *ci,
+                         enum child_kind kind, int sig) {
+	struct action *a = push(out, A_SIGNAL, ci);
+	if (a) {
+		a->kind = kind;
+		a->sig = sig;
+	}
+}
+
 static void signal_child(struct actions *out, const struct core_iface *ci,
                          int sig) {
-	struct action *a = push(out, A_SIGNAL, ci);
-	if (a)
-		a->sig = sig;
+	child_signal(out, ci, K_DHCPC, sig);
 }
 
 const struct core_iface *core_find(const struct core *c, const char *ifname) {
@@ -89,11 +97,21 @@ static int matches(const struct profile *p, const struct core_iface *ci) {
 	return strcmp(p->interface, ci->name) == 0;
 }
 
+static void stop_child(struct core_iface *ci, enum child_kind kind, int sig,
+                       uint64_t now, struct actions *out) {
+	ci->st = C_STOPPING;
+	ci->stop_kind = kind;
+	ci->stop_at = now + STOP_TIMEOUT_MS;
+	child_signal(out, ci, kind, sig);
+}
+
 static void begin_stop(struct core_iface *ci, int sig, uint64_t now,
                        struct actions *out) {
-	ci->st = C_STOPPING;
-	ci->stop_at = now + STOP_TIMEOUT_MS;
-	signal_child(out, ci, sig);
+	stop_child(ci, K_DHCPC, sig, now, out);
+}
+
+static int has_child(const struct core_iface *ci) {
+	return ci->st == C_RUNNING || ci->st == C_PROBING || ci->st == C_STATIC;
 }
 
 static void end_conn(struct core_iface *ci) {
@@ -153,7 +171,7 @@ static void sensor_stop(struct core_iface *ci, uint64_t now,
 
 static void sensor_sync(struct core_iface *ci, uint64_t now,
                         struct actions *out) {
-	int want = ci->st == C_RUNNING && ci->want_addr;
+	int want = (ci->st == C_RUNNING || ci->st == C_STATIC) && ci->want_addr;
 	if (ci->sst == S_OFF && want) {
 		struct action *a = push(out, A_SPAWN_SENSOR, ci);
 		if (!a)
@@ -183,6 +201,22 @@ static void sensor_sync(struct core_iface *ci, uint64_t now,
 	}
 }
 
+static void push_static(const struct core_iface *ci, enum act_type type,
+                        struct actions *out) {
+	struct action *a = push(out, type, ci);
+	if (!a)
+		return;
+	a->addr = ci->conn.ip;
+	a->prefix = ci->conn.prefix;
+	a->gw = ci->conn.has_gateway ? ci->conn.gateway : 0;
+	if (ci->has_conn_conf) {
+		a->has_metric = ci->conn_conf.has_metric;
+		a->metric = ci->conn_conf.metric;
+		a->has_table = ci->conn_conf.has_table;
+		snprintf(a->table, sizeof(a->table), "%s", ci->conn_conf.table);
+	}
+}
+
 static void spawn_with(struct core_iface *ci, const struct profile *p,
                        const struct iface_conf *conf, uint64_t now,
                        struct actions *out) {
@@ -201,10 +235,19 @@ static void spawn_with(struct core_iface *ci, const struct profile *p,
 	ci->pending[0] = '\0';
 
 	if (p->address == ADDR_STATIC) {
-		ci->st = C_BLOCKED;
-		ci->blocked = B_UNSUPPORTED;
-		log_msg(out, ci, "profile %s: static addressing is not implemented yet",
-		        p->name);
+		ci->started_at = now;
+		ci->want_addr = 0;
+		if (ci->dispute) {
+			push_static(ci, A_STATIC_APPLY, out);
+			ci->st = C_STATIC;
+			return;
+		}
+		struct action *a = push(out, A_SPAWN_PROBE, ci);
+		if (!a)
+			return;
+		a->kind = K_PROBE;
+		a->addr = p->ip;
+		ci->st = C_PROBING;
 		return;
 	}
 
@@ -270,6 +313,61 @@ static void resume(struct core *c, struct core_iface *ci, uint64_t now,
 		try_autoconnect(c, ci, now, out);
 }
 
+static void after_stop(struct core *c, struct core_iface *ci, uint64_t now,
+                       struct actions *out) {
+	ci->stop_at = 0;
+	if (ci->alert_stop) {
+		ci->alert_stop = 0;
+		ci->st = C_BLOCKED;
+		ci->blocked = B_ALERT;
+		return;
+	}
+	ci->st = C_IDLE;
+	ci->kept[0] = '\0';
+	if (c->shutting_down)
+		return;
+	const struct iface_conf *conf;
+	const struct profile *p =
+	    ci->pending[0] ? profile_by_name(c, ci->pending) : NULL;
+	ci->pending[0] = '\0';
+	if (p && matches(p, ci) && managed(c, ci, &conf))
+		spawn(c, ci, p, now, out);
+	else
+		try_autoconnect(c, ci, now, out);
+}
+
+static void release(struct core *c, struct core_iface *ci, uint64_t now,
+                    struct actions *out) {
+	if (ci->st == C_RUNNING) {
+		begin_stop(ci, SIGUSR1, now, out);
+	} else if (ci->st == C_PROBING) {
+		stop_child(ci, K_PROBE, SIGTERM, now, out);
+	} else if (ci->st == C_STATIC) {
+		push_static(ci, A_STATIC_REMOVE, out);
+		ci->want_addr = 0;
+		sensor_sync(ci, now, out);
+		ci->st = C_STOPPING;
+		after_stop(c, ci, now, out);
+	}
+}
+
+static void taken(struct core_iface *ci, uint32_t ip, const char *mac,
+                  const char *src, struct actions *out) {
+	char addr[INET_ADDRSTRLEN];
+	inet_ntop(AF_INET, &ip, addr, sizeof(addr));
+	ci->st = C_BLOCKED;
+	ci->blocked = B_TAKEN;
+	log_msg(out, ci, "static address %s in use by %s", addr, mac);
+	struct action *a = push(out, A_ALERT, ci);
+	if (!a)
+		return;
+	a->alert = AL_WARN;
+	a->level = STATIC_TAKEN_LEVEL;
+	snprintf(a->kase, sizeof(a->kase), "static-taken");
+	snprintf(a->msg, sizeof(a->msg), "ip %s mac %.32s%s%.32s", addr, mac,
+	         src ? " src " : "", src ? src : "");
+}
+
 void core_init(struct core *c, const struct config *cfg) {
 	memset(c, 0, sizeof(*c));
 	c->cfg = cfg;
@@ -305,12 +403,16 @@ void core_link(struct core *c, const char *ifname, int physical, uint64_t now,
 
 void core_link_gone(struct core *c, const char *ifname, uint64_t now,
                     struct actions *out) {
-	(void)now;
 	struct core_iface *ci = find(c, ifname);
 	if (!ci)
 		return;
 	ci->present = 0;
-	if (ci->st == C_BACKOFF) {
+	if (ci->st == C_STATIC) {
+		ci->st = C_WAIT_LINK;
+		ci->want_addr = 0;
+		sensor_sync(ci, now, out);
+		log_msg(out, ci, "removed, waiting for it to come back");
+	} else if (ci->st == C_BACKOFF) {
 		ci->st = C_WAIT_LINK;
 		log_msg(out, ci, "removed, waiting for it to come back");
 	}
@@ -328,7 +430,11 @@ static void on_failure(struct core *c, struct core_iface *ci, uint64_t now,
 		ci->backoff_ms = BACKOFF_MIN_MS;
 	ci->st = C_BACKOFF;
 	ci->retry_at = now + ci->backoff_ms;
-	log_msg(out, ci, "relaunching tundra-dhcpc in %u ms", ci->backoff_ms);
+	if (ci->conn.address == ADDR_STATIC)
+		log_msg(out, ci, "retrying the static address in %u ms",
+		        ci->backoff_ms);
+	else
+		log_msg(out, ci, "relaunching tundra-dhcpc in %u ms", ci->backoff_ms);
 	ci->backoff_ms *= 2;
 	if (ci->backoff_ms > BACKOFF_MAX_MS)
 		ci->backoff_ms = BACKOFF_MAX_MS;
@@ -337,28 +443,11 @@ static void on_failure(struct core *c, struct core_iface *ci, uint64_t now,
 void core_child_exit(struct core *c, const char *ifname, int status,
                      uint64_t now, struct actions *out) {
 	struct core_iface *ci = find(c, ifname);
-	if (!ci || (ci->st != C_RUNNING && ci->st != C_STOPPING))
+	if (!ci || (ci->st != C_RUNNING &&
+	            (ci->st != C_STOPPING || ci->stop_kind != K_DHCPC)))
 		return;
-
-	if (ci->st == C_STOPPING && ci->alert_stop) {
-		ci->alert_stop = 0;
-		ci->st = C_BLOCKED;
-		ci->blocked = B_ALERT;
-		return;
-	}
 	if (ci->st == C_STOPPING) {
-		ci->st = C_IDLE;
-		ci->kept[0] = '\0';
-		if (c->shutting_down)
-			return;
-		const struct iface_conf *conf;
-		const struct profile *p =
-		    ci->pending[0] ? profile_by_name(c, ci->pending) : NULL;
-		ci->pending[0] = '\0';
-		if (p && matches(p, ci) && managed(c, ci, &conf))
-			spawn(c, ci, p, now, out);
-		else
-			try_autoconnect(c, ci, now, out);
+		after_stop(c, ci, now, out);
 		return;
 	}
 
@@ -402,8 +491,10 @@ void core_timer(struct core *c, uint64_t now, struct actions *out) {
 			resume(c, ci, now, out);
 		if (ci->st == C_STOPPING && ci->stop_at && now >= ci->stop_at) {
 			ci->stop_at = 0;
-			signal_child(out, ci, SIGKILL);
-			log_msg(out, ci, "tundra-dhcpc did not stop in %u s, killed",
+			child_signal(out, ci, ci->stop_kind, SIGKILL);
+			log_msg(out, ci, "%s did not stop in %u s, killed",
+			        ci->stop_kind == K_DHCPC ? "tundra-dhcpc"
+			                                 : "tundra-blueice-arp",
 			        STOP_TIMEOUT_MS / 1000);
 		}
 		if (ci->sst == S_BACKOFF && now >= ci->s_retry_at) {
@@ -440,17 +531,20 @@ enum connect_result core_connect(struct core *c, const char *profile,
 	if (ci->blocked == B_ALERT && strcmp(ci->profile, p->name) == 0)
 		return CONNECT_ALERT_PENDING;
 
-	if (ci->st != C_RUNNING || strcmp(ci->profile, p->name) != 0) {
+	int same = strcmp(ci->profile, p->name) == 0;
+	if (!has_child(ci) || !same) {
 		end_conn(ci);
 		ci->stop_id = 0;
 	}
 	ci->manual_off = 0;
 	switch (ci->st) {
 	case C_RUNNING:
-		if (strcmp(ci->profile, p->name) == 0)
+	case C_PROBING:
+	case C_STATIC:
+		if (same)
 			return CONNECT_OK;
 		snprintf(ci->pending, sizeof(ci->pending), "%s", p->name);
-		begin_stop(ci, SIGUSR1, now, out);
+		release(c, ci, now, out);
 		return CONNECT_OK;
 	case C_STOPPING:
 		snprintf(ci->pending, sizeof(ci->pending), "%s", p->name);
@@ -478,16 +572,23 @@ int core_disconnect(struct core *c, const char *ifname, uint64_t now,
 	end_conn(ci);
 	switch (ci->st) {
 	case C_RUNNING:
-		begin_stop(ci, SIGUSR1, now, out);
+	case C_PROBING:
+	case C_STATIC:
+		release(c, ci, now, out);
 		break;
 	case C_BACKOFF:
 	case C_WAIT_LINK:
 		ci->st = C_IDLE;
 		ci->kept[0] = '\0';
 		break;
+	case C_BLOCKED:
+		if (ci->blocked != B_ALERT) {
+			ci->st = C_IDLE;
+			ci->blocked = B_NONE;
+		}
+		break;
 	case C_IDLE:
 	case C_STOPPING:
-	case C_BLOCKED:
 		break;
 	}
 	return 0;
@@ -497,11 +598,13 @@ void core_shutdown(struct core *c, uint64_t now, struct actions *out) {
 	c->shutting_down = 1;
 	for (int i = 0; i < c->n; i++) {
 		struct core_iface *ci = &c->ifs[i];
-		if (ci->st == C_RUNNING) {
+		if (ci->st == C_RUNNING)
 			begin_stop(ci, SIGTERM, now, out);
-		} else if (ci->st == C_BACKOFF || ci->st == C_WAIT_LINK) {
+		else if (ci->st == C_PROBING)
+			stop_child(ci, K_PROBE, SIGTERM, now, out);
+		else if (ci->st == C_BACKOFF || ci->st == C_WAIT_LINK ||
+		         ci->st == C_STATIC)
 			ci->st = C_IDLE;
-		}
 		sensor_stop(ci, now, out);
 	}
 }
@@ -579,12 +682,13 @@ static void keep(struct core_iface *ci, const char *why, struct actions *out) {
 
 static void reload_iface(struct core *c, struct core_iface *ci, uint64_t now,
                          struct actions *out) {
-	if (ci->st == C_BLOCKED && ci->blocked != B_ALERT) {
+	if (ci->st == C_BLOCKED && ci->blocked != B_ALERT &&
+	    ci->blocked != B_TAKEN) {
 		ci->st = C_IDLE;
 		ci->blocked = B_NONE;
 		return;
 	}
-	if (ci->st != C_RUNNING && ci->st != C_BACKOFF && ci->st != C_WAIT_LINK)
+	if (!has_child(ci) && ci->st != C_BACKOFF && ci->st != C_WAIT_LINK)
 		return;
 
 	const struct profile *p = profile_by_name(c, ci->profile);
@@ -595,8 +699,8 @@ static void reload_iface(struct core *c, struct core_iface *ci, uint64_t now,
 		ci->kept[0] = '\0';
 		end_conn(ci);
 		log_msg(out, ci, "profile %s removed, disconnecting", ci->profile);
-		if (ci->st == C_RUNNING)
-			begin_stop(ci, SIGUSR1, now, out);
+		if (has_child(ci))
+			release(c, ci, now, out);
 		else
 			ci->st = C_IDLE;
 		return;
@@ -616,7 +720,7 @@ static void reload_iface(struct core *c, struct core_iface *ci, uint64_t now,
 		return;
 	}
 	end_conn(ci);
-	if (ci->st != C_RUNNING)
+	if (!has_child(ci))
 		return;
 	if (matches(p, ci)) {
 		log_msg(out, ci, "profile %s changed, reconnecting", p->name);
@@ -625,7 +729,7 @@ static void reload_iface(struct core *c, struct core_iface *ci, uint64_t now,
 		log_msg(out, ci, "profile %s no longer matches, disconnecting",
 		        p->name);
 	}
-	begin_stop(ci, SIGUSR1, now, out);
+	release(c, ci, now, out);
 }
 
 void core_reload(struct core *c, const struct config *cfg, uint64_t now,
@@ -642,7 +746,7 @@ void core_reload(struct core *c, const struct config *cfg, uint64_t now,
 void core_lease(struct core *c, const char *ifname, uint32_t addr, uint32_t gw,
                 uint64_t now, struct actions *out) {
 	struct core_iface *ci = find(c, ifname);
-	if (!ci)
+	if (!ci || ci->st == C_PROBING || ci->st == C_STATIC)
 		return;
 	if (!addr)
 		ci->conflict_addr = 0;
@@ -654,15 +758,15 @@ void core_lease(struct core *c, const char *ifname, uint32_t addr, uint32_t gw,
 		sensor_sync(ci, now, out);
 }
 
-static void stop_one(struct core_iface *ci, int level, unsigned int id,
-                     uint64_t now, struct actions *out) {
+static void stop_one(struct core *c, struct core_iface *ci, int level,
+                     unsigned int id, uint64_t now, struct actions *out) {
 	ci->pending[0] = '\0';
 	if (level >= TRUST_LEVEL && ci->st != C_IDLE && !ci->override)
 		ci->override = id;
 	ci->stop_id = id;
-	if (ci->st == C_RUNNING) {
+	if (has_child(ci)) {
 		ci->alert_stop = 1;
-		begin_stop(ci, SIGUSR1, now, out);
+		release(c, ci, now, out);
 	} else if (ci->st == C_STOPPING) {
 		ci->alert_stop = 1;
 	} else {
@@ -679,7 +783,7 @@ void core_stop(struct core *c, const char *ifname, int level, unsigned int id,
 		c->lockdown = 1;
 		c->lockdown_id = id;
 		for (int i = 0; i < c->n; i++) {
-			stop_one(&c->ifs[i], level, id, now, out);
+			stop_one(c, &c->ifs[i], level, id, now, out);
 			log_msg(out, &c->ifs[i], "stopped by an alert of level %d on %s",
 			        level, ifname);
 		}
@@ -688,7 +792,7 @@ void core_stop(struct core *c, const char *ifname, int level, unsigned int id,
 	struct core_iface *ci = find(c, ifname);
 	if (!ci)
 		return;
-	stop_one(ci, level, id, now, out);
+	stop_one(c, ci, level, id, now, out);
 	log_msg(out, ci, "stopped by an alert of level %d", level);
 }
 
@@ -793,7 +897,8 @@ void core_restore_stop(struct core *c, const char *ifname, const char *profile,
 }
 
 void core_sensor_exit(struct core *c, const char *ifname, int status,
-                      int conflict, uint64_t now, struct actions *out) {
+                      const char *conflict_mac, uint64_t now,
+                      struct actions *out) {
 	struct core_iface *ci = find(c, ifname);
 	if (!ci || (ci->sst != S_RUNNING && ci->sst != S_STOPPING))
 		return;
@@ -806,7 +911,13 @@ void core_sensor_exit(struct core *c, const char *ifname, int status,
 	}
 	ci->sst = S_OFF;
 	int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-	if (code == 1 && conflict) {
+	if (code == 1 && conflict_mac && ci->st == C_STATIC) {
+		push_static(ci, A_STATIC_REMOVE, out);
+		ci->want_addr = 0;
+		taken(ci, ci->s_addr, conflict_mac, NULL, out);
+		return;
+	}
+	if (code == 1 && conflict_mac) {
 		ci->conflict_addr = ci->s_addr;
 		ci->want_addr = 0;
 		log_msg(out, ci, "address conflict, asking tundra-dhcpc for another");
@@ -849,4 +960,60 @@ void core_sensor_exit(struct core *c, const char *ifname, int status,
 	ci->s_backoff_ms *= 2;
 	if (ci->s_backoff_ms > BACKOFF_MAX_MS)
 		ci->s_backoff_ms = BACKOFF_MAX_MS;
+}
+
+void core_probe_exit(struct core *c, const char *ifname, int status,
+                     enum probe_result result, const char *mac, const char *src,
+                     uint64_t now, struct actions *out) {
+	struct core_iface *ci = find(c, ifname);
+	if (!ci)
+		return;
+	if (ci->st == C_STOPPING && ci->stop_kind == K_PROBE) {
+		after_stop(c, ci, now, out);
+		return;
+	}
+	if (ci->st != C_PROBING)
+		return;
+	int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+	if (code == 0 && result == PROBE_FREE) {
+		push_static(ci, A_STATIC_APPLY, out);
+		ci->st = C_STATIC;
+	} else if (code == 0 && result == PROBE_TAKEN) {
+		taken(ci, ci->conn.ip, mac && *mac ? mac : "-", src, out);
+	} else if (code == 2) {
+		ci->st = C_BLOCKED;
+		ci->blocked = B_CONFIG;
+		log_msg(out, ci, "probe rejected profile %s, waiting for a reload",
+		        ci->profile);
+	} else if (code == 111) {
+		ci->st = C_BLOCKED;
+		ci->blocked = B_ALERT;
+	} else {
+		if (code < 0)
+			log_msg(out, ci, "probe killed by signal %d", WTERMSIG(status));
+		else
+			log_msg(out, ci, "probe exited with %d", code);
+		on_failure(c, ci, now, out);
+	}
+}
+
+void core_static_result(struct core *c, const char *ifname, int rc,
+                        uint64_t now, struct actions *out) {
+	struct core_iface *ci = find(c, ifname);
+	if (!ci || ci->st != C_STATIC)
+		return;
+	if (rc == 0) {
+		ci->want_addr = ci->conn.ip;
+		ci->want_gw = ci->conn.has_gateway ? ci->conn.gateway : 0;
+		log_msg(out, ci, "static address of profile %s applied", ci->profile);
+		sensor_sync(ci, now, out);
+	} else if (rc == STATIC_USAGE) {
+		ci->st = C_BLOCKED;
+		ci->blocked = B_CONFIG;
+		log_msg(out, ci, "tundra-ip rejected profile %s, waiting for a reload",
+		        ci->profile);
+	} else {
+		log_msg(out, ci, "could not apply the static address");
+		on_failure(c, ci, now, out);
+	}
 }

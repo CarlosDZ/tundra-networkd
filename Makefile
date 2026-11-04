@@ -53,7 +53,7 @@ TEST_BUILD = $(BUILD)/test
 TEST_BIN = $(TEST_BUILD)/tundra-networkd
 TEST_TOOLS = $(patsubst tests/tools/%.c,$(TEST_BUILD)/tools/%,$(wildcard tests/tools/*.c))
 TEST_DEFS = -D_GNU_SOURCE -DTUNDRA_NETWORKD_VERSION=\"$(VERSION)-test\" \
-            -DTUNDRA_IP_PATH=\"$(TUNDRA_IP_PATH)\" \
+            -DTUNDRA_IP_PATH=\"$(CURDIR)/tests/tools/tip-wrap.sh\" \
             -DTUNDRA_DHCPC_PATH=\"$(CURDIR)/$(TEST_BUILD)/tools/dhcpc-fake\" \
             -DTUNDRA_BLUEICE_ARP_PATH=\"$(CURDIR)/$(TEST_BUILD)/tools/biarp-fake\" \
             -DTUNDRA_NETWORKD_CONF_DIR=\"$(CURDIR)/$(TEST_BUILD)/conf\" \

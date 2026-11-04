@@ -9,7 +9,9 @@ runs what the profiles and the user ask for.
 DNS goes to `/run/tundra/network/resolv.conf` and nowhere else: link
 `/etc/resolv.conf` to it to follow the active connections.
 
-Every connection with a lease runs `tundra-blueice-arp watch` on its address.
+A static address is probed with `tundra-blueice-arp probe` and applied with
+`tundra-ip`, with the same routes and rule as a lease. Every connection with an
+address runs `tundra-blueice-arp watch` on it.
 Pending alerts are kept in `/run/tundra/network/alerts`, so a restarted daemon
 keeps stopped what an alert stopped.
 
@@ -71,4 +73,5 @@ make check
   there), or the binary in `DHCPC_REAL`. The attack scenario also runs the test
   build of `tundra-blueice-arp` and its `arpsend` tool from
   `../tundra-blueice-arp/build/test/` (or `BIARP_REAL`). The others use fakes
-  built from `tests/tools/`.
+  built from `tests/tools/`. `tundra-ip` is taken from `/usr/local/bin` (or
+  `TIP_REAL`).

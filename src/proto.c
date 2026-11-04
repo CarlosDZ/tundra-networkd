@@ -67,6 +67,10 @@ static const char *state_name(const struct iface_view *v) {
 		return v->unmanaged ? "unmanaged" : "idle";
 	case C_RUNNING:
 		return v->connected ? "connected" : "connecting";
+	case C_PROBING:
+		return "connecting";
+	case C_STATIC:
+		return "connected";
 	case C_STOPPING:
 		return "stopping";
 	case C_BACKOFF:
@@ -87,8 +91,8 @@ static const char *block_reason(enum block_reason b) {
 		return " reason exited";
 	case B_ALERT:
 		return " reason alert";
-	case B_UNSUPPORTED:
-		return " reason unsupported";
+	case B_TAKEN:
+		return " reason taken";
 	case B_NONE:
 		break;
 	}

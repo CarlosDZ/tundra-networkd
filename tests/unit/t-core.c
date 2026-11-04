@@ -125,9 +125,9 @@ static void test_managed(void) {
 	reset("");
 	add("10-fixed", "tnd0", STATIC);
 	core_link(&c, "tnd0", 1, 0, &out);
-	CHECK(count(A_SPAWN_DHCPC) == 0 && st("tnd0") == C_BLOCKED &&
-	          logged("not implemented"),
-	      "a static profile is reported, not launched");
+	CHECK(count(A_SPAWN_DHCPC) == 0 && count(A_SPAWN_PROBE) == 1 &&
+	          st("tnd0") == C_PROBING,
+	      "a static profile starts with a probe, not with dhcpc");
 }
 
 static void test_supervision(void) {
@@ -468,19 +468,19 @@ static void test_sensor(void) {
 	CHECK(sensor_act(SIGTERM) && count(A_SPAWN_SENSOR) == 0,
 	      "a new address stops the sensor");
 	out.n = 0;
-	core_sensor_exit(&c, "tnd0", EXITED(0), 0, 400, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(0), NULL, 400, &out);
 	CHECK(count(A_SPAWN_SENSOR) == 1 && find_act(A_SPAWN_SENSOR)->addr == a201,
 	      "and relaunches it on the new one");
 	out.n = 0;
 	core_lease(&c, "tnd0", 0, 0, 500, &out);
-	core_sensor_exit(&c, "tnd0", EXITED(0), 0, 600, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(0), NULL, 600, &out);
 	CHECK(sensor_act(SIGTERM) && count(A_SPAWN_SENSOR) == 0 &&
 	          tnd0()->sst == S_OFF,
 	      "losing the lease stops the sensor");
 
 	core_lease(&c, "tnd0", a202, gw, 700, &out);
 	out.n = 0;
-	core_sensor_exit(&c, "tnd0", EXITED(1), 1, 800, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(1), "02:aa:aa:aa:aa:01", 800, &out);
 	CHECK(dhcpc_sig(SIGUSR2) && count(A_SPAWN_SENSOR) == 0,
 	      "a conflict asks tundra-dhcpc for another address");
 	out.n = 0;
@@ -491,17 +491,17 @@ static void test_sensor(void) {
 	CHECK(count(A_SPAWN_SENSOR) == 1, "but does on the next one");
 
 	out.n = 0;
-	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 2000, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(1), NULL, 2000, &out);
 	CHECK(tnd0()->sst == S_BACKOFF &&
 	          logged("relaunching tundra-blueice-arp in 1000 ms"),
 	      "a failing sensor is relaunched with backoff");
 	CHECK(core_next_deadline(&c) == 3000, "the backoff is a deadline");
 	core_timer(&c, 3000, &out);
 	CHECK(count(A_SPAWN_SENSOR) == 1, "and relaunched when it expires");
-	core_sensor_exit(&c, "tnd0", SIGSEGV, 0, 3100, &out);
+	core_sensor_exit(&c, "tnd0", SIGSEGV, NULL, 3100, &out);
 	core_timer(&c, 5100, &out);
 	out.n = 0;
-	core_sensor_exit(&c, "tnd0", EXITED(2), 0, 5200, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(2), NULL, 5200, &out);
 	CHECK(logged("failed 3 times in a row") && find_act(A_ALERT) &&
 	          find_act(A_ALERT)->alert == AL_STOP &&
 	          find_act(A_ALERT)->level == 5 &&
@@ -521,9 +521,9 @@ static void test_sensor(void) {
 	add("10-a", "tnd0", AUTO);
 	core_link(&c, "tnd0", 1, 0, &out);
 	core_lease(&c, "tnd0", a200, gw, 0, &out);
-	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 100, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(1), NULL, 100, &out);
 	core_timer(&c, 1100, &out);
-	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 1100 + STABLE_MS, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(1), NULL, 1100 + STABLE_MS, &out);
 	CHECK(tnd0()->s_fails == 1 &&
 	          logged("relaunching tundra-blueice-arp in 1000 ms"),
 	      "a sensor that lasted 60 s starts counting again");
@@ -544,7 +544,7 @@ static void test_stop(void) {
 	          st("tnd1") == C_RUNNING,
 	      "level 8 releases only that interface");
 	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
-	core_sensor_exit(&c, "tnd0", EXITED(111), 0, 200, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(111), NULL, 200, &out);
 	CHECK(st("tnd0") == C_BLOCKED && tnd0()->blocked == B_ALERT &&
 	          count(A_SPAWN_SENSOR) == 0,
 	      "and leaves it stopped, without a sensor");
@@ -573,7 +573,7 @@ static void test_stop(void) {
 	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
 	CHECK(sensor_act(SIGTERM) && !core_done(&c),
 	      "the shutdown waits for the sensor");
-	core_sensor_exit(&c, "tnd0", EXITED(0), 0, 300, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(0), NULL, 300, &out);
 	CHECK(core_done(&c) && count(A_SPAWN_SENSOR) == 0,
 	      "and is done once it exits");
 }
@@ -597,7 +597,7 @@ static void test_alerts(void) {
 	core_note_alert(&c, "tnd0", 8, 7);
 	core_stop(&c, "tnd0", 8, 7, 100, &out);
 	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
-	core_sensor_exit(&c, "tnd0", EXITED(111), 0, 200, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(111), NULL, 200, &out);
 	CHECK(ifc("tnd0")->stop_id == 7 && ifc("tnd0")->override == 7,
 	      "a stop of level 8 ties the interface to its alert and lowers trust");
 	out.n = 0;
@@ -613,7 +613,7 @@ static void test_alerts(void) {
 	CHECK(ifc("tnd0")->override == 7, "the forced connection stays untrusted");
 	core_stop(&c, "tnd0", 6, 8, 500, &out);
 	core_child_exit(&c, "tnd0", EXITED(0), 600, &out);
-	core_sensor_exit(&c, "tnd0", SIGTERM, 0, 600, &out);
+	core_sensor_exit(&c, "tnd0", SIGTERM, NULL, 600, &out);
 	core_force(&c, 8, "tnd0", "C", 6, 700, &out);
 	CHECK(ifc("tnd0")->naccepts == 2, "accepts pile up within the connection");
 	core_disconnect(&c, "tnd0", 740, &out);
@@ -624,7 +624,7 @@ static void test_alerts(void) {
 	core_lease(&c, "tnd0", a200, gw, 800, &out);
 	core_stop(&c, "tnd0", 6, 9, 900, &out);
 	core_child_exit(&c, "tnd0", EXITED(0), 950, &out);
-	core_sensor_exit(&c, "tnd0", SIGTERM, 0, 950, &out);
+	core_sensor_exit(&c, "tnd0", SIGTERM, NULL, 950, &out);
 	out.n = 0;
 	core_force(&c, 9, "tnd0", "C", 6, 1000, &out);
 	CHECK(find_act(A_SPAWN_DHCPC) && find_act(A_SPAWN_DHCPC)->probe_off,
@@ -718,15 +718,172 @@ static void test_alerts(void) {
 	ci->naccepts = 1;
 	snprintf(ci->accepts[0].kase, sizeof(ci->accepts[0].kase), "sensor-down");
 	ci->accepts[0].level = 5;
-	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 10, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(1), NULL, 10, &out);
 	core_timer(&c, 1010, &out);
-	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 1020, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(1), NULL, 1020, &out);
 	core_timer(&c, 3020, &out);
 	out.n = 0;
-	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 3030, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(1), NULL, 3030, &out);
 	CHECK(find_act(A_ALERT) && find_act(A_ALERT)->alert == AL_WARN &&
 	          ci->sst == S_BACKOFF && ci->s_fails == 0,
 	      "a forced sensor-down only warns and keeps relaunching");
+}
+
+#define STATIC_GW                                                              \
+	" address = 192.168.1.50/24\n gateway = 192.168.1.1\n dns = 9.9.9.9\n"     \
+	" autoconnect = yes\n trusted = no\n"
+
+static const struct action *kind_sig(enum child_kind kind, int sig) {
+	for (int i = 0; i < out.n; i++)
+		if (out.a[i].type == A_SIGNAL && out.a[i].kind == kind &&
+		    out.a[i].sig == sig)
+			return &out.a[i];
+	return NULL;
+}
+
+static void probe_free(uint64_t now) {
+	core_probe_exit(&c, "tnd0", EXITED(0), PROBE_FREE, NULL, NULL, now, &out);
+}
+
+static void test_static(void) {
+	uint32_t ip = inet_addr("192.168.1.50"), gw = inet_addr("192.168.1.1");
+	reset("tnd0 {\n metric = 300\n table = 100\n}\n");
+	add("10-fixed", "tnd0", STATIC_GW);
+	add("20-dhcp", "tnd0", MANUAL);
+	core_link(&c, "tnd0", 1, 0, &out);
+	CHECK(find_act(A_SPAWN_PROBE) && find_act(A_SPAWN_PROBE)->addr == ip &&
+	          st("tnd0") == C_PROBING,
+	      "a static profile probes its address first");
+	out.n = 0;
+	probe_free(100);
+	const struct action *a = find_act(A_STATIC_APPLY);
+	CHECK(a && a->addr == ip && a->prefix == 24 && a->gw == gw &&
+	          a->has_metric && a->metric == 300 && a->has_table &&
+	          strcmp(a->table, "100") == 0 && st("tnd0") == C_STATIC,
+	      "a free address is applied with metric and table");
+	CHECK(count(A_SPAWN_SENSOR) == 0, "the sensor waits for tundra-ip");
+	out.n = 0;
+	core_static_result(&c, "tnd0", 0, 110, &out);
+	CHECK(find_act(A_SPAWN_SENSOR) && find_act(A_SPAWN_SENSOR)->addr == ip &&
+	          find_act(A_SPAWN_SENSOR)->gw == gw,
+	      "and then watched");
+	out.n = 0;
+	core_lease(&c, "tnd0", 0, 0, 120, &out);
+	CHECK(out.n == 0, "lease events do not touch a static connection");
+
+	out.n = 0;
+	core_disconnect(&c, "tnd0", 200, &out);
+	CHECK(find_act(A_STATIC_REMOVE) && kind_sig(K_SENSOR, SIGTERM) &&
+	          st("tnd0") == C_IDLE,
+	      "DISCONNECT removes it at once");
+	out.n = 0;
+	core_connect(&c, "10-fixed", "tnd0", 300, &out);
+	CHECK(find_act(A_SPAWN_PROBE), "CONNECT probes again");
+	out.n = 0;
+	core_disconnect(&c, "tnd0", 310, &out);
+	CHECK(kind_sig(K_PROBE, SIGTERM) && st("tnd0") == C_STOPPING,
+	      "DISCONNECT during the probe stops the probe");
+	core_probe_exit(&c, "tnd0", SIGTERM, PROBE_NONE, NULL, NULL, 320, &out);
+	CHECK(st("tnd0") == C_IDLE, "and ends idle when it exits");
+
+	core_connect(&c, "10-fixed", "tnd0", 400, &out);
+	out.n = 0;
+	core_probe_exit(&c, "tnd0", EXITED(0), PROBE_TAKEN, "02:aa:aa:aa:aa:01",
+	                "02:bb:bb:bb:bb:bb", 500, &out);
+	a = find_act(A_ALERT);
+	CHECK(a && a->alert == AL_WARN && a->level == 2 &&
+	          strcmp(a->kase, "static-taken") == 0 &&
+	          strcmp(a->msg, "ip 192.168.1.50 mac 02:aa:aa:aa:aa:01 src "
+	                         "02:bb:bb:bb:bb:bb") == 0 &&
+	          !find_act(A_STATIC_APPLY),
+	      "a taken address is not applied and raises static-taken");
+	CHECK(st("tnd0") == C_BLOCKED && ifc("tnd0")->blocked == B_TAKEN,
+	      "and leaves the interface blocked");
+	out.n = 0;
+	core_timer(&c, 500 + BACKOFF_MAX_MS, &out);
+	core_reload(&c, &cfg, 600, &out);
+	CHECK(count(A_SPAWN_PROBE) == 0 && st("tnd0") == C_BLOCKED,
+	      "without retrying, not even on reload");
+	CHECK(core_connect(&c, "10-fixed", "tnd0", 700, &out) == CONNECT_OK &&
+	          find_act(A_SPAWN_PROBE),
+	      "until a CONNECT");
+
+	out.n = 0;
+	core_probe_exit(&c, "tnd0", EXITED(1), PROBE_NONE, NULL, NULL, 800, &out);
+	CHECK(st("tnd0") == C_BACKOFF &&
+	          logged("retrying the static address in 1000 ms"),
+	      "a failing probe is retried with backoff");
+	out.n = 0;
+	core_timer(&c, 1800, &out);
+	CHECK(find_act(A_SPAWN_PROBE), "and probes again");
+	probe_free(1900);
+	out.n = 0;
+	core_static_result(&c, "tnd0", STATIC_FAIL, 1950, &out);
+	CHECK(st("tnd0") == C_BACKOFF && count(A_SPAWN_SENSOR) == 0,
+	      "a failure of tundra-ip is retried too");
+	core_timer(&c, 1950 + BACKOFF_MAX_MS, &out);
+	probe_free(70000);
+	core_static_result(&c, "tnd0", STATIC_USAGE, 70010, &out);
+	CHECK(st("tnd0") == C_BLOCKED && ifc("tnd0")->blocked == B_CONFIG,
+	      "a usage error of tundra-ip waits for a reload");
+
+	reset("");
+	add("10-fixed", "tnd0", STATIC_GW);
+	add("20-dhcp", "tnd0", MANUAL);
+	core_link(&c, "tnd0", 1, 0, &out);
+	probe_free(10);
+	core_static_result(&c, "tnd0", 0, 20, &out);
+	out.n = 0;
+	core_sensor_exit(&c, "tnd0", EXITED(1), "02:aa:aa:aa:aa:01", 30, &out);
+	a = find_act(A_ALERT);
+	CHECK(find_act(A_STATIC_REMOVE) && a &&
+	          strcmp(a->msg, "ip 192.168.1.50 mac 02:aa:aa:aa:aa:01") == 0 &&
+	          ifc("tnd0")->blocked == B_TAKEN && !kind_sig(K_DHCPC, SIGUSR2),
+	      "the sensor giving the address up removes it and warns");
+
+	core_connect(&c, "10-fixed", "tnd0", 100, &out);
+	probe_free(110);
+	core_static_result(&c, "tnd0", 0, 120, &out);
+	out.n = 0;
+	core_stop(&c, "tnd0", 6, 1, 200, &out);
+	CHECK(find_act(A_STATIC_REMOVE) && st("tnd0") == C_BLOCKED &&
+	          ifc("tnd0")->blocked == B_ALERT,
+	      "a stop removes the static address");
+	core_sensor_exit(&c, "tnd0", EXITED(111), NULL, 210, &out);
+	out.n = 0;
+	core_force(&c, 1, "tnd0", "C", 6, 300, &out);
+	CHECK(find_act(A_STATIC_APPLY) && !find_act(A_SPAWN_PROBE),
+	      "forcing a dispute applies it without probing");
+	core_static_result(&c, "tnd0", 0, 310, &out);
+	CHECK(find_act(A_SPAWN_SENSOR) && find_act(A_SPAWN_SENSOR)->defend_always,
+	      "and watches it with defend always");
+
+	out.n = 0;
+	core_link_gone(&c, "tnd0", 400, &out);
+	CHECK(st("tnd0") == C_WAIT_LINK && kind_sig(K_SENSOR, SIGTERM),
+	      "a removed interface takes the address with it");
+	core_sensor_exit(&c, "tnd0", EXITED(1), NULL, 410, &out);
+	out.n = 0;
+	core_link(&c, "tnd0", 1, 500, &out);
+	CHECK(find_act(A_STATIC_APPLY), "and comes back when it returns");
+	core_static_result(&c, "tnd0", 0, 510, &out);
+
+	out.n = 0;
+	core_connect(&c, "20-dhcp", "tnd0", 600, &out);
+	CHECK(find_act(A_STATIC_REMOVE) && find_act(A_SPAWN_DHCPC) &&
+	          st("tnd0") == C_RUNNING,
+	      "switching to a DHCP profile removes the address first");
+
+	reset("");
+	add("10-fixed", "tnd0", STATIC_GW);
+	core_link(&c, "tnd0", 1, 0, &out);
+	probe_free(10);
+	core_static_result(&c, "tnd0", 0, 20, &out);
+	out.n = 0;
+	core_shutdown(&c, 30, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(0), NULL, 40, &out);
+	CHECK(!find_act(A_STATIC_REMOVE) && core_done(&c),
+	      "the shutdown leaves the static address in place");
 }
 
 int main(void) {
@@ -742,5 +899,6 @@ int main(void) {
 	test_sensor();
 	test_stop();
 	test_alerts();
+	test_static();
 	return test_summary();
 }

@@ -18,6 +18,8 @@ LOG=$WORK/networkd.log
 LEASES=/run/tundra/dhcpc
 SENSOR_HISTORY=/run/tundra/blueice/arp
 SOCK=/run/tundra-test/network.socket
+TIP_FAIL=$WORK/tip-fail
+export TIP_FAIL
 DHCPC_FAKE_DIR=$WORK/fake
 DHCPC_REAL=${DHCPC_REAL:-$ROOT/../tundra-dhcpc/build/test/tundra-dhcpc}
 BIARP_FAKE_DIR=$WORK/biarp
@@ -156,6 +158,30 @@ launches() {
 sensor() {
 	mkdir -p "$BIARP_FAKE_DIR"
 	echo "$1" >"$BIARP_FAKE_DIR/mode"
+}
+
+probe() {
+	mkdir -p "$BIARP_FAKE_DIR"
+	echo "$1" >"$BIARP_FAKE_DIR/probe"
+}
+
+probes() {
+	cat "$BIARP_FAKE_DIR/probes" 2>/dev/null | wc -l
+}
+
+static_profile() {
+	write_conf "$1.tnc" <<END
+match {
+	interface = $IF
+}
+apply {
+	address = $2
+	gateway = $NET.1
+	dns = ${3:-9.9.9.9}
+	autoconnect = yes
+	trusted = no
+}
+END
 }
 
 sensor_launches() {

@@ -10,6 +10,7 @@
 #include "resolv.h"
 #include "server.h"
 #include "spawn.h"
+#include "static.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -49,7 +50,10 @@ struct child {
 	int fd;
 	int reaped;
 	enum child_kind kind;
-	int conflict;
+	char conflict_mac[32];
+	enum probe_result probe;
+	char mac[32];
+	char src[32];
 	char ifname[IF_NAMESIZE];
 	char profile[PROFILE_NAME_MAX + 1];
 	char line[OUT_LINE_MAX];
@@ -191,7 +195,8 @@ static void own_alert(struct daemon *d, const struct action *act) {
 	         stop ? "force,disconnect" : "ack,disconnect", act->kase, act->msg,
 	         strcmp(act->kase, "sensor-down") == 0
 	             ? "tundra-blueice-arp keeps failing"
-	             : act->kase);
+	         : strcmp(act->kase, "static-taken") == 0 ? "static address in use"
+	                                                  : act->kase);
 	printf("networkd: %s\n", line);
 	if (alert_parse(line, &a) == 0)
 		take_alert(d, act->iface, &a, line);
@@ -199,14 +204,14 @@ static void own_alert(struct daemon *d, const struct action *act) {
 
 static void handle_alert(struct daemon *d, struct child *k) {
 	const char *from =
-	    k->kind == K_SENSOR ? "tundra-blueice-arp" : "tundra-dhcpc";
+	    k->kind == K_DHCPC ? "tundra-dhcpc" : "tundra-blueice-arp";
 	struct alert a;
 	if (alert_parse(k->line, &a) < 0) {
 		printf("networkd: %s: malformed alert from %s discarded\n", k->ifname,
 		       from);
 		return;
 	}
-	if (!alert_allowed(k->kind == K_SENSOR ? SRC_SENSOR : SRC_DHCPC, a.by)) {
+	if (!alert_allowed(k->kind == K_DHCPC ? SRC_DHCPC : SRC_SENSOR, a.by)) {
 		printf("networkd: %s: alert by %s discarded on the pipe of %s\n",
 		       k->ifname, a.by, from);
 		return;
@@ -222,14 +227,22 @@ static void handle_alert(struct daemon *d, struct child *k) {
 static void emit_line(struct daemon *d, struct child *k) {
 	k->line[k->len] = '\0';
 	k->len = 0;
-	if (k->kind == K_SENSOR)
-		printf("blueice-arp[%s]: %s\n", k->ifname, k->line);
-	else
+	if (k->kind == K_DHCPC)
 		printf("dhcpc[%s/%s]: %s\n", k->ifname, k->profile, k->line);
+	else
+		printf("blueice-arp[%s]: %s\n", k->ifname, k->line);
 	if (strncmp(k->line, "alert ", 6) == 0)
 		handle_alert(d, k);
-	else if (k->kind == K_SENSOR && strncmp(k->line, "conflict addr ", 14) == 0)
-		k->conflict = 1;
+	else if (k->kind == K_SENSOR &&
+	         strncmp(k->line, "conflict addr ", 14) == 0 &&
+	         sscanf(k->line, "conflict addr %*s mac %31s", k->conflict_mac) !=
+	             1)
+		snprintf(k->conflict_mac, sizeof(k->conflict_mac), "-");
+	else if (k->kind == K_PROBE && strcmp(k->line, "free") == 0)
+		k->probe = PROBE_FREE;
+	else if (k->kind == K_PROBE &&
+	         sscanf(k->line, "taken mac %31s src %31s", k->mac, k->src) >= 1)
+		k->probe = PROBE_TAKEN;
 }
 
 static void release_child(struct daemon *d, struct child *k) {
@@ -298,6 +311,25 @@ static struct child *new_child(struct daemon *d, const char *path,
 	snprintf(k->profile, sizeof(k->profile), "%s", profile);
 	watch_fd(d, fd, ((uint64_t)T_CHILD << 32) | (uint64_t)(k - d->kids));
 	return k;
+}
+
+static void spawn_probe(struct daemon *d, const struct action *a) {
+	char addr[INET_ADDRSTRLEN];
+	inet_ntop(AF_INET, &a->addr, addr, sizeof(addr));
+	char *argv[] = {"tundra-blueice-arp", "probe", (char *)a->iface, addr,
+	                NULL};
+	struct child *k =
+	    new_child(d, TUNDRA_BLUEICE_ARP_PATH, argv, K_PROBE, a->iface, "");
+	if (!k) {
+		struct actions acts = {0};
+		fprintf(stderr, "networkd: %s: cannot launch tundra-blueice-arp\n",
+		        a->iface);
+		core_probe_exit(&d->core, a->iface, 1 << 8, PROBE_NONE, NULL, NULL,
+		                now_ms(), &acts);
+		execute(d, &acts);
+		return;
+	}
+	printf("networkd: %s: probing %s (pid %d)\n", a->iface, addr, (int)k->pid);
 }
 
 static void spawn_sensor(struct daemon *d, const struct action *a) {
@@ -391,6 +423,21 @@ static void execute(struct daemon *d, struct actions *acts) {
 		case A_SPAWN_SENSOR:
 			spawn_sensor(d, a);
 			break;
+		case A_SPAWN_PROBE:
+			spawn_probe(d, a);
+			break;
+		case A_STATIC_APPLY: {
+			struct actions next = {0};
+			int rc = static_apply(a);
+			core_static_result(&d->core, a->iface, rc, now_ms(), &next);
+			execute(d, &next);
+			d->dirty = 1;
+			break;
+		}
+		case A_STATIC_REMOVE:
+			static_remove(a);
+			d->dirty = 1;
+			break;
 		case A_SIGNAL:
 			if ((k = running_child(d, a->iface, a->kind)))
 				kill(k->pid, a->sig);
@@ -468,14 +515,18 @@ static void reap(struct daemon *d) {
 			d->dirty = 1;
 			struct actions acts = {0};
 			char ifname[IF_NAMESIZE];
-			enum child_kind kind = k->kind;
-			int conflict = k->conflict;
+			struct child done = *k;
 			snprintf(ifname, sizeof(ifname), "%s", k->ifname);
 			if (k->fd < 0)
 				k->used = 0;
-			if (kind == K_SENSOR)
-				core_sensor_exit(&d->core, ifname, status, conflict, now_ms(),
-				                 &acts);
+			if (done.kind == K_SENSOR)
+				core_sensor_exit(&d->core, ifname, status,
+				                 done.conflict_mac[0] ? done.conflict_mac
+				                                      : NULL,
+				                 now_ms(), &acts);
+			else if (done.kind == K_PROBE)
+				core_probe_exit(&d->core, ifname, status, done.probe, done.mac,
+				                done.src[0] ? done.src : NULL, now_ms(), &acts);
 			else
 				core_child_exit(&d->core, ifname, status, now_ms(), &acts);
 			execute(d, &acts);
@@ -550,10 +601,20 @@ static void refresh(struct daemon *d) {
 		struct lease_info li;
 		char lease[LEASE_FILE_MAX];
 		size_t len;
-		if (ci->st == C_RUNNING &&
-		    read_lease(ci->name, ci->profile, lease, sizeof(lease), &len) ==
-		        0 &&
-		    leaseinfo_parse(lease, len, &li) == 0) {
+		int up = 0;
+		if (ci->st == C_STATIC && ci->want_addr) {
+			memset(&li, 0, sizeof(li));
+			li.address = ci->conn.ip;
+			li.prefix = ci->conn.prefix;
+			li.router = ci->conn.has_gateway ? ci->conn.gateway : 0;
+			up = 1;
+		} else if (ci->st == C_RUNNING &&
+		           read_lease(ci->name, ci->profile, lease, sizeof(lease),
+		                      &len) == 0 &&
+		           leaseinfo_parse(lease, len, &li) == 0) {
+			up = 1;
+		}
+		if (up) {
 			now.connected = 1;
 			snprintf(now.profile, sizeof(now.profile), "%s", ci->profile);
 			leaseinfo_address(&li, now.address);

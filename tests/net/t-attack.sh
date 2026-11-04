@@ -40,4 +40,28 @@ expect_log "blueice-arp\[$IF\]: alert 111/8 stop by tundra-blueice-arp on $IF .*
 eventually "and releases the address" 5 no_addr
 stop_daemon
 expect_exit 0 "the daemon stops"
+
+probing() {
+	[ "$(grep -c "probing $NET.50" "$LOG")" -eq "$1" ]
+}
+
+static_addr() {
+	[ "$(in_ns ip -4 -o addr show dev "$IF" | awk '{print $4}')" = "$NET.50/24" ]
+}
+
+setup
+static_profile oficina "$NET.50/24"
+in_evil ip addr add "$NET.50/24" dev "$EVIF"
+evmac=$(in_evil cat "/sys/class/net/$EVIF/address")
+start_daemon
+expect_log "$IF: static address $NET.50 in use by $evmac" 10 "an attacker holding the static address is detected"
+check "the address is not applied" no_addr
+check "static-taken names the attacker" sh -c "$TOOLS/ctl '$SOCK' ALERTS | grep -q ' info case static-taken ip $NET.50 mac $evmac '"
+sleep 2
+check "nothing retries" probing 1
+in_evil ip addr del "$NET.50/24" dev "$EVIF"
+check "CONNECT" reply_is "OK" CONNECT oficina
+eventually "once free, the static address is applied" 10 static_addr
+expect_log "blueice-arp\[$IF\]: gateway is at " 10 "and watched by the real sensor"
+stop_daemon
 summary

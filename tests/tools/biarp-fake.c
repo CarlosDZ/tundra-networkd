@@ -46,6 +46,40 @@ static const char *arg_after(int argc, char *argv[], const char *key) {
 	return "-";
 }
 
+static int probe(int argc, char *argv[]) {
+	char how[32] = "free";
+	FILE *f = open_in("probe", "r");
+	if (f) {
+		if (!fgets(how, sizeof(how), f))
+			snprintf(how, sizeof(how), "free");
+		fclose(f);
+		how[strcspn(how, "\n")] = '\0';
+	}
+	f = open_in("probes", "a");
+	if (f) {
+		for (int i = 1; i < argc; i++)
+			fprintf(f, "%s%s", i > 1 ? " " : "", argv[i]);
+		fputc('\n', f);
+		fclose(f);
+	}
+	if (strcmp(how, "taken") == 0) {
+		printf("taken mac 02:aa:aa:aa:aa:01 src 02:aa:aa:aa:aa:01\n");
+		return 0;
+	}
+	if (strcmp(how, "alert") == 0) {
+		fprintf(
+		    stderr,
+		    "alert 111/4 stop by tundra-blueice-arp on %s ts 0.000 reply "
+		    "force,disconnect info case A mac 02:aa:aa:aa:aa:01 -- fake A\n",
+		    argv[2]);
+		return 111;
+	}
+	if (strncmp(how, "exit", 4) == 0)
+		return atoi(how + 4);
+	printf("free\n");
+	return 0;
+}
+
 int main(int argc, char *argv[]) {
 	char mode[32];
 	if (read_mode(mode, sizeof(mode)) < 0) {
@@ -56,6 +90,9 @@ int main(int argc, char *argv[]) {
 	}
 	if (argc < 3)
 		return 2;
+
+	if (strcmp(argv[1], "probe") == 0)
+		return probe(argc, argv);
 
 	FILE *f = open_in("launches", "a");
 	if (f) {
