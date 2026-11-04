@@ -330,6 +330,106 @@ static void test_stop_timeout(void) {
 	      "the shutdown has the same deadline");
 }
 
+static struct config k[2];
+static int cur;
+
+#define IF100 "tnd0 {\n metric = 100\n}\n"
+#define IF300 "tnd0 {\n metric = 300\n}\n"
+#define DNS9                                                                   \
+	" address = dhcp\n dns = 9.9.9.9\n autoconnect = yes\n trusted = no\n"
+#define TRUSTED                                                                \
+	" address = dhcp\n dns = 9.9.9.9\n autoconnect = yes\n trusted = yes\n"
+
+static void build(struct config *cf, const char *ifaces, const char *iface,
+                  const char *apply) {
+	char buf[512];
+	memset(cf, 0, sizeof(*cf));
+	ifaces_parse(&cf->ifaces, ifaces, strlen(ifaces));
+	if (!apply)
+		return;
+	snprintf(buf, sizeof(buf), "match {\n interface = %s\n}\napply {\n%s}\n",
+	         iface, apply);
+	profile_parse(&cf->profiles[cf->n++], "10-a", buf, strlen(buf), 0);
+}
+
+static void reload(const char *ifaces, const char *iface, const char *apply,
+                   uint64_t now) {
+	cur ^= 1;
+	build(&k[cur], ifaces, iface, apply);
+	out.n = 0;
+	core_reload(&c, &k[cur], now, &out);
+}
+
+static const struct core_iface *tnd0(void) { return core_find(&c, "tnd0"); }
+
+static void test_reload(void) {
+	cur = 0;
+	build(&k[0], IF100, "tnd0", AUTO);
+	core_init(&c, &k[0]);
+	core_link(&c, "tnd0", 1, 0, &out);
+
+	reload(IF100, "tnd0", AUTO, 1000);
+	CHECK(out.n == 0 && st("tnd0") == C_RUNNING,
+	      "a reload without changes does nothing");
+	reload(IF100, "tnd0", DNS9, 2000);
+	CHECK(out.n == 0 && tnd0()->conn.dns == DNS_LIST,
+	      "only dns: no reconnect, the new dns is taken");
+	reload(IF300, "tnd0", DNS9, 3000);
+	CHECK(count(A_SIGNAL) == 1 && find_act(A_SIGNAL)->sig == SIGUSR1 &&
+	          strcmp(tnd0()->pending, "10-a") == 0 &&
+	          logged("profile 10-a changed, reconnecting"),
+	      "a change in interfaces reconnects");
+	core_child_exit(&c, "tnd0", EXITED(0), 3100, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 1 && find_act(A_SPAWN_DHCPC)->metric == 300,
+	      "and relaunches with the new metric");
+	reload(IF300, "tnd0", TRUSTED, 4000);
+	CHECK(count(A_SIGNAL) == 1, "a change in the profile reconnects");
+	core_child_exit(&c, "tnd0", EXITED(0), 4100, &out);
+
+	reload(IF300, "tnd0", " address = dhcp\n", 5000);
+	CHECK(count(A_SIGNAL) == 0 && st("tnd0") == C_RUNNING &&
+	          logged("profile 10-a has errors, keeping the previous") &&
+	          tnd0()->kept[0],
+	      "a profile with errors keeps the connection");
+	core_child_exit(&c, "tnd0", EXITED(1), 5100, &out);
+	out.n = 0;
+	core_timer(&c, 5100 + BACKOFF_MAX_MS, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 1 && find_act(A_SPAWN_DHCPC)->metric == 300 &&
+	          tnd0()->conn.trusted,
+	      "and a relaunch uses the previous configuration");
+	reload("tnd0 {\n wifi = yes\n}\n", "tnd0", TRUSTED, 6000);
+	CHECK(count(A_SIGNAL) == 0 && logged("interfaces has errors, keeping"),
+	      "an error in interfaces keeps the connection");
+	reload(IF300, "tnd0", TRUSTED, 7000);
+	CHECK(out.n == 0 && !tnd0()->kept[0],
+	      "fixing the errors with the same configuration changes nothing");
+
+	reload(IF300, "tnd1", TRUSTED, 8000);
+	CHECK(count(A_SIGNAL) == 1 && !tnd0()->pending[0] &&
+	          logged("no longer matches, disconnecting"),
+	      "a profile moved to another interface disconnects");
+	core_child_exit(&c, "tnd0", EXITED(0), 8100, &out);
+	reload(IF300, "tnd0", TRUSTED, 9000);
+	CHECK(count(A_SPAWN_DHCPC) == 1, "a new profile autoconnects on reload");
+
+	reload(IF300, "tnd0", NULL, 10000);
+	CHECK(count(A_SIGNAL) == 1 && !tnd0()->pending[0] &&
+	          logged("profile 10-a removed, disconnecting"),
+	      "a deleted profile disconnects");
+	core_child_exit(&c, "tnd0", EXITED(0), 10100, &out);
+	CHECK(st("tnd0") == C_IDLE && count(A_SPAWN_DHCPC) == 0,
+	      "and nothing takes its place");
+
+	reload(IF300, "tnd0", TRUSTED, 11000);
+	core_child_exit(&c, "tnd0", EXITED(2), 11100, &out);
+	reload(IF300, "tnd0", TRUSTED, 12000);
+	CHECK(count(A_SPAWN_DHCPC) == 1, "a reload unblocks a rejected profile");
+	core_child_exit(&c, "tnd0", EXITED(111), 12100, &out);
+	reload(IF300, "tnd0", TRUSTED, 13000);
+	CHECK(count(A_SPAWN_DHCPC) == 0 && st("tnd0") == C_BLOCKED,
+	      "but not one stopped by an alert");
+}
+
 int main(void) {
 	test_autoconnect();
 	test_managed();
@@ -339,5 +439,6 @@ int main(void) {
 	test_user();
 	test_shutdown();
 	test_stop_timeout();
+	test_reload();
 	return test_summary();
 }

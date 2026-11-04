@@ -17,10 +17,12 @@ static int bad(const char *line, const char *error) {
 	return c.type == CMD_BAD && strcmp(c.error, error) == 0;
 }
 
+static const char *kept;
+
 static int status(struct core_iface *ci, const struct profile *p, int conn,
                   const char *addr, const char *unmanaged, const char *want) {
 	char out[512];
-	struct iface_view v = {ci, p, conn, addr, unmanaged};
+	struct iface_view v = {ci, p, conn, addr, unmanaged, kept};
 	return proto_status(&v, out, sizeof(out)) >= 0 && strcmp(out, want) == 0;
 }
 
@@ -63,6 +65,13 @@ int main(void) {
 	             "iface enp8s0 state connecting profile casa address - "
 	             "trusted no"),
 	      "a connection without lease");
+	kept = "profile casa has errors";
+	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
+	             "iface enp8s0 state connected profile casa address "
+	             "10.79.0.100/24 trusted no -- previous configuration kept: "
+	             "profile casa has errors"),
+	      "a connection kept by a reload says so");
+	kept = NULL;
 	ci.st = C_IDLE;
 	CHECK(status(&ci, NULL, 0, NULL, NULL,
 	             "iface enp8s0 state idle profile - address - trusted -"),

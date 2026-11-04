@@ -101,14 +101,20 @@ static int fit(int n, size_t size) {
 
 int proto_status(const struct iface_view *v, char *out, size_t size) {
 	const struct core_iface *ci = v->ci;
-	int unmanaged = ci->st == C_IDLE && v->unmanaged;
-	int n = snprintf(out, size,
-	                 "iface %s state %s%s profile %s address %s trusted %s%s%s",
-	                 ci->name, state_name(v),
-	                 ci->st == C_BLOCKED ? block_reason(ci->blocked) : "",
-	                 v->p ? v->p->name : "-", v->address ? v->address : "-",
-	                 v->p ? (v->p->trusted ? "yes" : "no") : "-",
-	                 unmanaged ? " -- " : "", unmanaged ? v->unmanaged : "");
+	const char *lead = "", *note = NULL;
+	if (ci->st == C_IDLE && v->unmanaged) {
+		note = v->unmanaged;
+	} else if (v->kept && v->kept[0]) {
+		lead = "previous configuration kept: ";
+		note = v->kept;
+	}
+	int n = snprintf(
+	    out, size, "iface %s state %s%s profile %s address %s trusted %s%s%s%s",
+	    ci->name, state_name(v),
+	    ci->st == C_BLOCKED ? block_reason(ci->blocked) : "",
+	    v->p ? v->p->name : "-", v->address ? v->address : "-",
+	    v->p ? (v->p->trusted ? "yes" : "no") : "-", note ? " -- " : "", lead,
+	    note ? note : "");
 	return fit(n, size);
 }
 

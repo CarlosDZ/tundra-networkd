@@ -55,6 +55,7 @@ struct conn_view {
 
 struct daemon {
 	struct config *cfg;
+	struct config *spare;
 	struct core core;
 	int ep;
 	int sfd;
@@ -366,8 +367,8 @@ static void refresh(struct daemon *d) {
 			now.connected = 1;
 			snprintf(now.profile, sizeof(now.profile), "%s", ci->profile);
 			leaseinfo_address(&li, now.address);
-			if (resolv_source(ci->name, find_profile(d->cfg, ci->profile),
-			                  ifaces_find(&d->cfg->ifaces, ci->name), &li,
+			if (resolv_source(ci->name, &ci->conn,
+			                  ci->has_conn_conf ? &ci->conn_conf : NULL, &li,
 			                  &src[n]) == 0)
 				n++;
 		}
@@ -390,9 +391,10 @@ static void reply_status(struct daemon *d, int client) {
 		const char *err = core_unmanaged(&d->core, ci->name);
 		struct iface_view v = {
 		    .ci = ci,
-		    .p = ci->st == C_IDLE ? NULL : find_profile(d->cfg, ci->profile),
+		    .p = ci->st == C_IDLE ? NULL : &ci->conn,
 		    .connected = d->view[i].connected,
 		    .address = d->view[i].connected ? d->view[i].address : NULL,
+		    .kept = ci->kept,
 		};
 		if (err) {
 			snprintf(why, sizeof(why), "interfaces: %s", err);
@@ -428,6 +430,25 @@ static const char *do_connect(struct daemon *d, const struct cmd *cmd) {
 	return proto_connect_error(r);
 }
 
+static void report_config(const struct config *cfg);
+
+static int do_reload(struct daemon *d) {
+	struct actions acts = {0};
+	if (conf_load(TUNDRA_NETWORKD_CONF_DIR, d->spare) < 0) {
+		printf("networkd: reload failed, keeping the configuration\n");
+		return -1;
+	}
+	report_config(d->spare);
+	core_reload(&d->core, d->spare, now_ms(), &acts);
+	struct config *old = d->cfg;
+	d->cfg = d->spare;
+	d->spare = old;
+	execute(d, &acts);
+	d->dirty = 1;
+	printf("networkd: configuration reloaded\n");
+	return 0;
+}
+
 static void on_command(void *ctx, int client, const char *line) {
 	struct daemon *d = ctx;
 	struct actions acts = {0};
@@ -459,7 +480,9 @@ static void on_command(void *ctx, int client, const char *line) {
 		server_send(&d->srv, client, "OK");
 		return;
 	case CMD_RELOAD:
-		server_send(&d->srv, client, "ERROR reload is not implemented yet");
+		server_send(&d->srv, client,
+		            do_reload(d) < 0 ? "ERROR cannot read the configuration"
+		                             : "OK");
 		return;
 	case CMD_SUBSCRIBE:
 		d->srv.c[client].subscribed = 1;
@@ -483,7 +506,7 @@ static int on_signal(struct daemon *d) {
 			reap(d);
 			break;
 		case SIGHUP:
-			printf("networkd: reload is not implemented yet\n");
+			do_reload(d);
 			break;
 		default:
 			printf("networkd: received %s, stopping\n",
@@ -521,6 +544,10 @@ static int open_signals(void) {
 static void report_config(const struct config *cfg) {
 	if (!cfg->ifaces.valid)
 		printf("networkd: interfaces: %s\n", cfg->ifaces.error);
+	for (int i = 0; cfg->ifaces.valid && i < cfg->ifaces.n; i++)
+		if (!cfg->ifaces.items[i].valid)
+			printf("networkd: interfaces: %s: %s\n", cfg->ifaces.items[i].name,
+			       cfg->ifaces.items[i].error);
 	for (int i = 0; i < cfg->n; i++)
 		if (!cfg->profiles[i].valid)
 			printf("networkd: profile %s: %s\n", cfg->profiles[i].name,
@@ -533,8 +560,10 @@ static void report_config(const struct config *cfg) {
 
 int loop_run(struct config *cfg) {
 	static struct daemon d;
+	static struct config spare;
 	memset(&d, 0, sizeof(d));
 	d.cfg = cfg;
+	d.spare = &spare;
 	for (int i = 0; i < CHILDREN_MAX; i++)
 		d.kids[i].fd = -1;
 	core_init(&d.core, cfg);

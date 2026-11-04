@@ -21,6 +21,7 @@ group does not exist). One command per line; each one answers `OK` or
 | `PROFILES` | One `profile` line per profile, in load order |
 | `CONNECT <profile> [interface]` | The interface is required for `interface = *` |
 | `DISCONNECT <interface>` | Releases the lease |
+| `RELOAD` | Rereads the configuration, as does `SIGHUP` |
 | `SUBSCRIBE` | From then on, `event connected` and `event disconnected` lines |
 
 ```

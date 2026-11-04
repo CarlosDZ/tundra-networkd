@@ -95,10 +95,20 @@ static void begin_stop(struct core_iface *ci, int sig, uint64_t now,
 	signal_child(out, ci, sig);
 }
 
-static void spawn(struct core *c, struct core_iface *ci,
-                  const struct profile *p, uint64_t now, struct actions *out) {
-	const struct iface_conf *conf;
-	managed(c, ci, &conf);
+static void spawn_with(struct core_iface *ci, const struct profile *p,
+                       const struct iface_conf *conf, uint64_t now,
+                       struct actions *out) {
+	if (p != &ci->conn) {
+		ci->conn = *p;
+		ci->kept[0] = '\0';
+	}
+	if (conf != &ci->conn_conf) {
+		ci->has_conn_conf = conf != NULL;
+		if (conf)
+			ci->conn_conf = *conf;
+	}
+	p = &ci->conn;
+	conf = ci->has_conn_conf ? &ci->conn_conf : NULL;
 	snprintf(ci->profile, sizeof(ci->profile), "%s", p->name);
 	ci->pending[0] = '\0';
 
@@ -123,6 +133,13 @@ static void spawn(struct core *c, struct core_iface *ci,
 	}
 	ci->st = C_RUNNING;
 	ci->started_at = now;
+}
+
+static void spawn(struct core *c, struct core_iface *ci,
+                  const struct profile *p, uint64_t now, struct actions *out) {
+	const struct iface_conf *conf;
+	managed(c, ci, &conf);
+	spawn_with(ci, p, conf, now, out);
 }
 
 static const struct profile *autoselect(const struct core *c,
@@ -151,6 +168,11 @@ static void resume(struct core *c, struct core_iface *ci, uint64_t now,
 	const struct profile *p = profile_by_name(c, ci->profile);
 	const struct iface_conf *conf;
 	ci->st = C_IDLE;
+	if (ci->kept[0] && !c->shutting_down) {
+		spawn_with(ci, &ci->conn, ci->has_conn_conf ? &ci->conn_conf : NULL,
+		           now, out);
+		return;
+	}
 	if (p && matches(p, ci) && managed(c, ci, &conf) && !c->shutting_down)
 		spawn(c, ci, p, now, out);
 	else
@@ -224,11 +246,14 @@ void core_child_exit(struct core *c, const char *ifname, int status,
 
 	if (ci->st == C_STOPPING) {
 		ci->st = C_IDLE;
+		ci->kept[0] = '\0';
 		if (c->shutting_down)
 			return;
+		const struct iface_conf *conf;
 		const struct profile *p =
 		    ci->pending[0] ? profile_by_name(c, ci->pending) : NULL;
-		if (p)
+		ci->pending[0] = '\0';
+		if (p && matches(p, ci) && managed(c, ci, &conf))
 			spawn(c, ci, p, now, out);
 		else
 			try_autoconnect(c, ci, now, out);
@@ -341,6 +366,7 @@ int core_disconnect(struct core *c, const char *ifname, uint64_t now,
 	case C_BACKOFF:
 	case C_WAIT_LINK:
 		ci->st = C_IDLE;
+		ci->kept[0] = '\0';
 		break;
 	case C_IDLE:
 	case C_STOPPING:
@@ -388,4 +414,96 @@ const char *core_unmanaged(const struct core *c, const char *ifname) {
 	if (!ci || managed(c, ci, &conf))
 		return NULL;
 	return conf ? conf->error : c->cfg->ifaces.error;
+}
+
+static int same_but_dns(const struct profile *a, const struct profile *b) {
+	return strcmp(a->interface, b->interface) == 0 &&
+	       a->any_interface == b->any_interface && a->has_ssid == b->has_ssid &&
+	       a->ssid_len == b->ssid_len &&
+	       memcmp(a->ssid, b->ssid, a->ssid_len) == 0 &&
+	       a->security == b->security &&
+	       a->has_passphrase == b->has_passphrase &&
+	       strcmp(a->passphrase, b->passphrase) == 0 &&
+	       a->address == b->address && a->ip == b->ip &&
+	       a->prefix == b->prefix && a->has_gateway == b->has_gateway &&
+	       a->gateway == b->gateway && a->autoconnect == b->autoconnect &&
+	       a->trusted == b->trusted;
+}
+
+static int same_conf(const struct core_iface *ci,
+                     const struct iface_conf *conf) {
+	static const struct iface_conf none;
+	const struct iface_conf *a = ci->has_conn_conf ? &ci->conn_conf : &none;
+	const struct iface_conf *b = conf ? conf : &none;
+	return a->has_metric == b->has_metric &&
+	       (!a->has_metric || a->metric == b->metric) &&
+	       a->has_table == b->has_table &&
+	       (!a->has_table || strcmp(a->table, b->table) == 0) &&
+	       a->has_grace == b->has_grace &&
+	       (!a->has_grace || a->grace_ms == b->grace_ms);
+}
+
+static void keep(struct core_iface *ci, const char *why, struct actions *out) {
+	snprintf(ci->kept, sizeof(ci->kept), "%s", why);
+	log_msg(out, ci, "%s, keeping the previous configuration", why);
+}
+
+static void reload_iface(struct core *c, struct core_iface *ci, uint64_t now,
+                         struct actions *out) {
+	if (ci->st == C_BLOCKED && ci->blocked != B_ALERT) {
+		ci->st = C_IDLE;
+		ci->blocked = B_NONE;
+		return;
+	}
+	if (ci->st != C_RUNNING && ci->st != C_BACKOFF && ci->st != C_WAIT_LINK)
+		return;
+
+	const struct profile *p = profile_by_name(c, ci->profile);
+	const struct iface_conf *conf;
+	int ok = managed(c, ci, &conf);
+	char why[CONF_ERR_MAX];
+	if (!p) {
+		ci->kept[0] = '\0';
+		log_msg(out, ci, "profile %s removed, disconnecting", ci->profile);
+		if (ci->st == C_RUNNING)
+			begin_stop(ci, SIGUSR1, now, out);
+		else
+			ci->st = C_IDLE;
+		return;
+	}
+	if (!p->valid) {
+		snprintf(why, sizeof(why), "profile %s has errors", p->name);
+		keep(ci, why, out);
+		return;
+	}
+	if (!ok) {
+		keep(ci, "interfaces has errors", out);
+		return;
+	}
+	ci->kept[0] = '\0';
+	if (same_but_dns(&ci->conn, p) && same_conf(ci, conf)) {
+		ci->conn = *p;
+		return;
+	}
+	if (ci->st != C_RUNNING)
+		return;
+	if (matches(p, ci)) {
+		log_msg(out, ci, "profile %s changed, reconnecting", p->name);
+		snprintf(ci->pending, sizeof(ci->pending), "%s", p->name);
+	} else {
+		log_msg(out, ci, "profile %s no longer matches, disconnecting",
+		        p->name);
+	}
+	begin_stop(ci, SIGUSR1, now, out);
+}
+
+void core_reload(struct core *c, const struct config *cfg, uint64_t now,
+                 struct actions *out) {
+	c->cfg = cfg;
+	if (c->shutting_down)
+		return;
+	for (int i = 0; i < c->n; i++)
+		reload_iface(c, &c->ifs[i], now, out);
+	for (int i = 0; i < c->n; i++)
+		try_autoconnect(c, &c->ifs[i], now, out);
 }

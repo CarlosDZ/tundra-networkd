@@ -34,6 +34,7 @@ struct iface_view {
 	int connected;
 	const char *address;
 	const char *unmanaged;
+	const char *kept;
 };
 
 void proto_parse(const char *line, struct cmd *out);

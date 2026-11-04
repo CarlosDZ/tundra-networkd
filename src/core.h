@@ -39,6 +39,10 @@ struct core_iface {
 	uint64_t started_at;
 	uint64_t retry_at;
 	uint64_t stop_at;
+	struct profile conn;
+	struct iface_conf conn_conf;
+	int has_conn_conf;
+	char kept[CONF_ERR_MAX + 48];
 };
 
 struct core {
@@ -93,6 +97,8 @@ enum connect_result core_connect(struct core *c, const char *profile,
 int core_disconnect(struct core *c, const char *ifname, uint64_t now,
                     struct actions *out);
 void core_shutdown(struct core *c, uint64_t now, struct actions *out);
+void core_reload(struct core *c, const struct config *cfg, uint64_t now,
+                 struct actions *out);
 int core_done(const struct core *c);
 uint64_t core_next_deadline(const struct core *c);
 const char *core_unmanaged(const struct core *c, const char *ifname);
