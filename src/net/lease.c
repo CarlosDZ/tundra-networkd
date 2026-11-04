@@ -1,29 +1,14 @@
 #include "lease.h"
+#include "files.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/inotify.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
-static int make_dirs(const char *dir) {
-	char path[PATH_MAX];
-	if (snprintf(path, sizeof(path), "%s", dir) >= (int)sizeof(path))
-		return -1;
-	for (char *p = path + 1; *p; p++) {
-		if (*p != '/')
-			continue;
-		*p = '\0';
-		if (mkdir(path, 0755) < 0 && errno != EEXIST)
-			return -1;
-		*p = '/';
-	}
-	return mkdir(path, 0700) < 0 && errno != EEXIST ? -1 : 0;
-}
-
 int lease_watch_open(const char *dir) {
-	if (make_dirs(dir) < 0) {
+	if (files_make_dirs(dir, 0700) < 0) {
 		fprintf(stderr, "cannot create %s: %s\n", dir, strerror(errno));
 		return -1;
 	}

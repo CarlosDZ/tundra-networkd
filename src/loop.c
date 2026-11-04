@@ -1,10 +1,14 @@
 #include "loop.h"
 #include "core.h"
+#include "files.h"
 #include "lease.h"
 #include "link.h"
+#include "resolv.h"
 #include "spawn.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <linux/if_arp.h>
 #include <signal.h>
 #include <stdint.h>
@@ -19,6 +23,8 @@
 #define CHILDREN_MAX (CORE_IFACES * 2)
 #define OUT_LINE_MAX 512
 #define DHCPC_LEASE_DIR "/run/tundra/dhcpc"
+#define LEASE_FILE_MAX 1024
+#define RESOLV_PATH TUNDRA_NETWORKD_RUN_DIR "/resolv.conf"
 #define T_SIGNAL 1
 #define T_LINK 2
 #define T_LEASE 3
@@ -43,6 +49,9 @@ struct daemon {
 	int lfd;
 	int ifd;
 	struct child kids[CHILDREN_MAX];
+	int dns_dirty;
+	int dns_written;
+	char dns[RESOLV_TEXT_MAX];
 };
 
 static uint64_t now_ms(void) {
@@ -169,10 +178,12 @@ static void execute(struct daemon *d, struct actions *acts) {
 		switch (a->type) {
 		case A_SPAWN_DHCPC:
 			spawn_dhcpc(d, a);
+			d->dns_dirty = 1;
 			break;
 		case A_SIGNAL:
 			if ((k = running_child(d, a->iface)))
 				kill(k->pid, a->sig);
+			d->dns_dirty = 1;
 			break;
 		case A_LOG:
 			printf("networkd: %s\n", a->msg);
@@ -213,6 +224,8 @@ static int on_link(struct daemon *d) {
 static void on_lease(struct daemon *d) {
 	struct lease_ev evs[LEASE_EVENTS_MAX];
 	int n = lease_watch_read(d->ifd, evs, LEASE_EVENTS_MAX);
+	if (n > 0)
+		d->dns_dirty = 1;
 	for (int i = 0; i < n; i++) {
 		for (int j = 0; j < CHILDREN_MAX; j++) {
 			struct child *k = &d->kids[j];
@@ -238,6 +251,7 @@ static void reap(struct daemon *d) {
 				continue;
 			drain(d, k);
 			k->reaped = 1;
+			d->dns_dirty = 1;
 			struct actions acts = {0};
 			char ifname[IF_NAMESIZE];
 			snprintf(ifname, sizeof(ifname), "%s", k->ifname);
@@ -248,6 +262,84 @@ static void reap(struct daemon *d) {
 			break;
 		}
 	}
+}
+
+static const struct profile *find_profile(const struct config *cfg,
+                                          const char *name) {
+	for (int i = 0; i < cfg->n; i++)
+		if (strcmp(cfg->profiles[i].name, name) == 0)
+			return &cfg->profiles[i];
+	return NULL;
+}
+
+static int read_lease(const char *ifname, const char *profile, char *buf,
+                      size_t size, size_t *len) {
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "%s/%s-%s.lease", DHCPC_LEASE_DIR, ifname,
+	         profile);
+	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+	if (fd < 0)
+		return -1;
+	*len = 0;
+	ssize_t n;
+	while (*len < size && (n = read(fd, buf + *len, size - *len)) != 0) {
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0) {
+			close(fd);
+			return -1;
+		}
+		*len += (size_t)n;
+	}
+	close(fd);
+	return 0;
+}
+
+static void log_dns(const char *text) {
+	char line[RESOLV_TEXT_MAX] = "";
+	size_t used = 0;
+	const char *p = text;
+	while ((p = strstr(p, "nameserver "))) {
+		p += strlen("nameserver ");
+		size_t n = strcspn(p, "\n");
+		used += (size_t)snprintf(line + used, sizeof(line) - used, " %.*s",
+		                         (int)n, p);
+		p += n;
+	}
+	printf("networkd: dns:%s\n", used ? line : " none");
+}
+
+static void update_dns(struct daemon *d) {
+	struct resolv_src src[CORE_IFACES];
+	int n = 0;
+	d->dns_dirty = 0;
+	for (int i = 0; i < d->core.n; i++) {
+		const struct core_iface *ci = &d->core.ifs[i];
+		char lease[LEASE_FILE_MAX];
+		size_t len;
+		if (ci->st != C_RUNNING ||
+		    read_lease(ci->name, ci->profile, lease, sizeof(lease), &len) < 0)
+			continue;
+		if (resolv_source(ci->name, find_profile(d->cfg, ci->profile),
+		                  ifaces_find(&d->cfg->ifaces, ci->name), lease, len,
+		                  &src[n]) == 0)
+			n++;
+	}
+
+	char text[RESOLV_TEXT_MAX];
+	if (resolv_build(src, n, text, sizeof(text)) < 0 ||
+	    (d->dns_written && strcmp(text, d->dns) == 0))
+		return;
+	if (files_make_dirs(TUNDRA_NETWORKD_RUN_DIR, 0755) < 0 ||
+	    files_write_atomic(RESOLV_PATH, text, strlen(text), 0644) < 0) {
+		fprintf(stderr, "networkd: cannot write %s: %s\n", RESOLV_PATH,
+		        strerror(errno));
+		d->dns_written = 0;
+		return;
+	}
+	snprintf(d->dns, sizeof(d->dns), "%s", text);
+	d->dns_written = 1;
+	log_dns(text);
 }
 
 static int on_signal(struct daemon *d) {
@@ -314,6 +406,7 @@ int loop_run(struct config *cfg) {
 	for (int i = 0; i < CHILDREN_MAX; i++)
 		d.kids[i].fd = -1;
 	core_init(&d.core, cfg);
+	d.dns_dirty = 1;
 	report_config(cfg);
 
 	d.ep = epoll_create1(EPOLL_CLOEXEC);
@@ -362,5 +455,7 @@ int loop_run(struct config *cfg) {
 			else if (type == T_CHILD && idx < CHILDREN_MAX && d.kids[idx].used)
 				drain(&d, &d.kids[idx]);
 		}
+		if (d.dns_dirty && !d.core.shutting_down)
+			update_dns(&d);
 	}
 }

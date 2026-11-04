@@ -7,6 +7,8 @@ if [ ! -x "$DHCPC_REAL" ]; then
 fi
 
 setup
+stop_dnsmasq
+start_dnsmasq --dhcp-option=6,"$NET.53"
 write_conf interfaces <<END
 $IF {
 	metric = 300
@@ -19,6 +21,7 @@ eventually "the address is applied" 3 has_addr
 eventually "the default route carries the interface metric" 3 sh -c "ip netns exec $NS ip route show default | grep -q 'metric 300'"
 eventually "the lease is stored under the profile key" 3 test -e "$LEASES/$IF-casa.lease"
 expect_log "$IF: lease for casa updated" 3 "the daemon sees the lease through inotify"
+eventually "the lease servers reach resolv.conf" 3 resolv_is "nameserver $NET.53"
 
 pid=$(child_pid casa)
 kill_daemon

@@ -4,6 +4,7 @@ NS=tnd
 EVIL=tndevil
 BR=tndbr0
 IF=tnd0
+IF2=tnd1
 EVIF=tnde0
 NET=10.79.0
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -123,7 +124,7 @@ match {
 }
 apply {
 	address = dhcp
-	dns = lease
+	dns = ${3:-lease}
 	autoconnect = yes
 	trusted = no
 }
@@ -194,10 +195,22 @@ child_pid() {
 }
 
 add_if() {
-	ip link add "$IF" type veth peer name "${IF}p"
-	ip link set "$IF" netns "$NS"
-	ip link set "${IF}p" master "$BR" up
-	in_ns ip link set "$IF" up
+	_if=${1:-$IF}
+	ip link add "$_if" type veth peer name "${_if}p"
+	ip link set "$_if" netns "$NS"
+	ip link set "${_if}p" master "$BR" up
+	in_ns ip link set "$_if" up
+}
+
+write_lease() {
+	mkdir -p "$LEASES"
+	printf 'address=%s\nmask=255.255.255.0\ndns=%s\nlease=3600\n' \
+		"$NET.200" "$2" >"$LEASES/$1.lease.tmp"
+	mv "$LEASES/$1.lease.tmp" "$LEASES/$1.lease"
+}
+
+resolv_is() {
+	[ -e "$RUN/resolv.conf" ] && [ "$(cat "$RUN/resolv.conf")" = "$1" ]
 }
 
 kill_ns() {
@@ -213,10 +226,11 @@ teardown_net() {
 	kill_ns "$NS"
 	kill_ns "$EVIL"
 	ip link del "${IF}p" 2>/dev/null
+	ip link del "${IF2}p" 2>/dev/null
 	ip link del "${EVIF}p" 2>/dev/null
 	ip link del "$BR" 2>/dev/null
 	rm -rf "$CONF" "$RUN" "$SYS" "$DHCPC_FAKE_DIR"
-	rm -f "$LEASES/$IF".lease "$LEASES/$IF"-*.lease
+	rm -f "$LEASES/$IF".lease "$LEASES/$IF"-*.lease "$LEASES/$IF2"-*.lease
 	rm -f "$SENSOR_HISTORY/$IF" "$SENSOR_HISTORY/$IF.lock"
 	return 0
 }

@@ -6,6 +6,9 @@ in the `.tnc` profiles of `/etc/tundra/network/`, supervises `tundra-dhcpc`,
 publishes state and alerts on a control socket. It never decides on its own: it
 runs what the profiles and the user ask for.
 
+DNS goes to `/run/tundra/network/resolv.conf` and nowhere else: link
+`/etc/resolv.conf` to it to follow the active connections.
+
 ## Requirements
 
 - Linux.
