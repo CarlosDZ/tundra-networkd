@@ -17,6 +17,7 @@ END
 cable_profile a "$IF"
 cable_profile b "$IF2" "10.0.0.3, 10.0.0.4"
 fake run
+sensor run
 start_daemon
 eventually "both profiles are connected" 5 launched 2
 eventually "no servers before any lease" 3 resolv_is ""
@@ -42,6 +43,7 @@ cable_profile b "$IF2"
 write_lease "$IF-a" "10.0.0.1"
 write_lease "$IF2-b" "10.0.0.5"
 fake run
+sensor run
 start_daemon
 eventually "leases kept from before count at once, dns = none adds nothing" 5 resolv_is "$(ns 10.0.0.5)"
 stop_daemon

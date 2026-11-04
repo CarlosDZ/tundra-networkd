@@ -17,6 +17,7 @@ setup
 ifaces "metric = 100"
 cable_profile casa
 fake run
+sensor run
 start_daemon
 eventually "casa connects" 5 launched 1
 wait_log "control socket on" 3
@@ -47,7 +48,7 @@ END
 check "RELOAD with an error in the profile" reply_is "OK" RELOAD
 check "the connection keeps the previous configuration" untouched 2 "$pid"
 expect_log "$IF: profile casa has errors, keeping the previous configuration" 1 "and says so"
-check "STATUS shows it" status_has "iface $IF state connected profile casa address $NET.200/24 trusted no -- previous configuration kept: profile casa has errors"
+check "STATUS shows it" status_has "iface $IF state connected profile casa address $NET.200/24 trusted no override - alert - -- previous configuration kept: profile casa has errors"
 check "PROFILES shows the error" sh -c "$TOOLS/ctl '$SOCK' PROFILES | grep -q '^profile casa invalid -- '"
 check "the profile cannot be connected again" reply_is "ERROR profile has errors" CONNECT casa
 
@@ -61,7 +62,7 @@ expect_log "networkd: interfaces: $IF: " 1 "with the error of the block"
 ifaces "metric = 300"
 check "RELOAD once fixed" reply_is "OK" RELOAD
 check "with the same configuration nothing changes" untouched 2 "$pid"
-check "and STATUS drops the note" status_has "iface $IF state connected profile casa address $NET.200/24 trusted no"
+check "and STATUS drops the note" status_has "iface $IF state connected profile casa address $NET.200/24 trusted no override - alert -"
 
 mv "$CONF" "$CONF.away"
 check "RELOAD without a configuration directory" reply_is "ERROR cannot read the configuration" RELOAD
@@ -75,7 +76,7 @@ kill -HUP "$DAEMON_PID"
 eventually "SIGHUP reloads: a deleted profile disconnects" 3 grep -q "^$pid USR1\$" "$DHCPC_FAKE_DIR/signals"
 eventually "with event disconnected" 3 has_event "event disconnected $IF casa"
 check "and nothing takes its place" untouched 2 none
-check "STATUS shows it idle" status_has "iface $IF state idle profile - address - trusted -"
+check "STATUS shows it idle" status_has "iface $IF state idle profile - address - trusted - override - alert -"
 
 cable_profile casa
 check "RELOAD with a new profile" reply_is "OK" RELOAD
@@ -84,9 +85,10 @@ eventually "it autoconnects" 3 launched 3
 fake exit2
 check "DISCONNECT" reply_is "OK" DISCONNECT "$IF"
 check "CONNECT with a dhcpc that rejects it" reply_is "OK" CONNECT casa
-eventually "the profile is blocked" 3 status_has "iface $IF state blocked reason config profile casa address - trusted no"
+eventually "the profile is blocked" 3 status_has "iface $IF state blocked reason config profile casa address - trusted no override - alert -"
 check "CONNECT asks for a reload" reply_is "ERROR profile rejected by tundra-dhcpc, reload first" CONNECT casa
 fake run
+sensor run
 check "RELOAD" reply_is "OK" RELOAD
 eventually "unblocks it" 3 launched 5
 stop_daemon

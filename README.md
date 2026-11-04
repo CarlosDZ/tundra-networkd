@@ -9,6 +9,10 @@ runs what the profiles and the user ask for.
 DNS goes to `/run/tundra/network/resolv.conf` and nowhere else: link
 `/etc/resolv.conf` to it to follow the active connections.
 
+Every connection with a lease runs `tundra-blueice-arp watch` on its address.
+Pending alerts are kept in `/run/tundra/network/alerts`, so a restarted daemon
+keeps stopped what an alert stopped.
+
 ## Control socket
 
 `/run/tundra/network.socket`, `0660 root:network` (`0600 root:root` while that
@@ -22,12 +26,15 @@ group does not exist). One command per line; each one answers `OK` or
 | `CONNECT <profile> [interface]` | The interface is required for `interface = *` |
 | `DISCONNECT <interface>` | Releases the lease |
 | `RELOAD` | Rereads the configuration, as does `SIGHUP` |
-| `SUBSCRIBE` | From then on, `event connected` and `event disconnected` lines |
+| `SUBSCRIBE` | From then on, `event` and `ALERT` lines |
+| `ALERTS` | One `ALERT` line per pending alert |
+| `ALERT-REPLY <id> <option>` | One of the options the alert offers in `reply` |
 
 ```
-iface enp8s0 state connected profile casa address 10.79.0.100/24 trusted no
+iface enp8s0 state connected profile casa address 10.79.0.100/24 trusted no override - alert -
 profile casa interface enp8s0 autoconnect yes trusted no
 event connected enp8s0 casa address 10.79.0.100/24
+ALERT 7 casa alert 111/8 stop by tundra-blueice-arp on enp8s0 ts 1762171512.347 reply force,disconnect info case D ...
 ```
 
 ## Requirements

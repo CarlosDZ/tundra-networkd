@@ -21,6 +21,7 @@ match {
 }
 END
 fake run
+sensor run
 start_daemon
 expect_log "control socket on $SOCK" 5 "the control socket is up"
 eventually "casa autoconnects" 5 launched 1
@@ -46,8 +47,8 @@ subscribe
 eventually "SUBSCRIBE answers OK" 3 has_event OK
 write_lease "$IF-casa" "10.0.0.1"
 eventually "a lease emits event connected" 3 has_event "event connected $IF casa address $NET.200/24"
-check "STATUS shows the connection" status_has "iface $IF state connected profile casa address $NET.200/24 trusted no"
-check "STATUS shows an idle interface" status_has "iface $IF2 state idle profile - address - trusted -"
+check "STATUS shows the connection" status_has "iface $IF state connected profile casa address $NET.200/24 trusted no override - alert -"
+check "STATUS shows an idle interface" status_has "iface $IF2 state idle profile - address - trusted - override - alert -"
 check "STATUS ends with OK" sh -c "$TOOLS/ctl '$SOCK' STATUS | tail -n 1 | grep -qx OK"
 check "PROFILES lists the profiles in order" sh -c "$TOOLS/ctl '$SOCK' PROFILES | head -n 3 | tr '\n' '|' | grep -qx 'profile 999-dhcp interface \* autoconnect yes trusted no|profile casa interface $IF autoconnect yes trusted no|profile manual interface $IF2 autoconnect no trusted yes|'"
 check "PROFILES shows the error of an invalid profile" sh -c "$TOOLS/ctl '$SOCK' PROFILES | grep -q '^profile roto invalid -- '"
@@ -64,14 +65,14 @@ check "ALERTS is an empty list" reply_is "OK" ALERTS
 check "ALERT-REPLY to an unknown alert" reply_is "ERROR unknown alert" ALERT-REPLY 1 force
 check "CONNECT a manual profile" reply_is "OK" CONNECT manual
 eventually "it launches tundra-dhcpc" 3 launched 2
-check "STATUS shows it connecting" status_has "iface $IF2 state connecting profile manual address - trusted yes"
+check "STATUS shows it connecting" status_has "iface $IF2 state connecting profile manual address - trusted yes override - alert -"
 
 check "DISCONNECT a missing interface" reply_is "ERROR no such interface" DISCONNECT tnd9
 pid=$(child_pid casa)
 check "DISCONNECT" reply_is "OK" DISCONNECT "$IF"
 eventually "dhcpc gets SIGUSR1" 3 grep -q "^$pid USR1\$" "$DHCPC_FAKE_DIR/signals"
 eventually "and the subscriber gets event disconnected" 3 has_event "event disconnected $IF casa"
-eventually "STATUS shows it idle" 3 status_has "iface $IF state idle profile - address - trusted -"
+eventually "STATUS shows it idle" 3 status_has "iface $IF state idle profile - address - trusted - override - alert -"
 
 check "a line too long closes the connection" sh -c "[ \"\$(printf '%0300d\n' 0 | $TOOLS/ctl '$SOCK')\" = 'ERROR line too long' ]"
 check "several commands in one write" sh -c "[ \"\$(printf 'ALERTS\r\nALERTS\n' | $TOOLS/ctl '$SOCK' | tr '\n' ' ')\" = 'OK OK ' ]"
@@ -102,12 +103,13 @@ check "the socket is removed on exit" test ! -e "$SOCK"
 setup
 cable_profile casa
 fake stubborn
+sensor run
 start_daemon
 eventually "a dhcpc that ignores signals is launched" 5 launched 1
 wait_log "control socket on" 3
 check "DISCONNECT is accepted" reply_is "OK" DISCONNECT "$IF"
 expect_log "$IF: tundra-dhcpc did not stop in 5 s, killed" 8 "it is killed after 5 s"
-eventually "and the interface ends idle" 3 status_has "iface $IF state idle profile - address - trusted -"
+eventually "and the interface ends idle" 3 status_has "iface $IF state idle profile - address - trusted - override - alert -"
 check "CONNECT again" reply_is "OK" CONNECT casa
 eventually "it is relaunched" 3 launched 2
 : >"$LOG"

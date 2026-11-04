@@ -1,6 +1,7 @@
 #ifndef TUNDRA_CORE_H
 #define TUNDRA_CORE_H
 
+#include "alert.h"
 #include "ifaces.h"
 #include "load.h"
 #include "profile.h"
@@ -17,6 +18,8 @@
 #define SENSOR_FAILS_MAX 3
 #define SENSOR_DOWN_LEVEL 5
 #define ALERT_ALL_LEVEL 9
+#define TRUST_LEVEL 6
+#define ACCEPTS_MAX 8
 
 enum conn_state {
 	C_IDLE,
@@ -30,6 +33,11 @@ enum conn_state {
 enum sensor_state { S_OFF, S_RUNNING, S_STOPPING, S_BACKOFF };
 enum child_kind { K_DHCPC, K_SENSOR };
 enum block_reason { B_NONE, B_CONFIG, B_EXITED, B_ALERT, B_UNSUPPORTED };
+
+struct accept {
+	char kase[ALERT_TOKEN_MAX + 1];
+	int level;
+};
 
 struct core_iface {
 	char name[IF_NAMESIZE];
@@ -60,6 +68,11 @@ struct core_iface {
 	uint64_t s_started_at;
 	uint64_t s_retry_at;
 	uint64_t s_stop_at;
+	struct accept accepts[ACCEPTS_MAX];
+	int naccepts;
+	int dispute;
+	unsigned int override;
+	unsigned int stop_id;
 };
 
 struct core {
@@ -68,9 +81,10 @@ struct core {
 	int n;
 	int shutting_down;
 	int lockdown;
+	unsigned int lockdown_id;
 };
 
-enum act_type { A_SPAWN_DHCPC, A_SPAWN_SENSOR, A_SIGNAL, A_LOG };
+enum act_type { A_SPAWN_DHCPC, A_SPAWN_SENSOR, A_SIGNAL, A_LOG, A_ALERT };
 
 struct action {
 	enum act_type type;
@@ -85,6 +99,12 @@ struct action {
 	unsigned int grace_ms;
 	uint32_t addr;
 	uint32_t gw;
+	int probe_off;
+	int defend_always;
+	char accept[ACCEPTS_MAX * (ALERT_TOKEN_MAX + 4)];
+	enum alert_action alert;
+	int level;
+	char kase[ALERT_TOKEN_MAX + 1];
 	char msg[160];
 };
 
@@ -122,8 +142,15 @@ void core_lease(struct core *c, const char *ifname, uint32_t addr, uint32_t gw,
                 uint64_t now, struct actions *out);
 void core_sensor_exit(struct core *c, const char *ifname, int status,
                       int conflict, uint64_t now, struct actions *out);
-void core_stop(struct core *c, const char *ifname, int level, uint64_t now,
-               struct actions *out);
+void core_stop(struct core *c, const char *ifname, int level, unsigned int id,
+               uint64_t now, struct actions *out);
+void core_note_alert(struct core *c, const char *ifname, int level,
+                     unsigned int id);
+int core_force(struct core *c, unsigned int id, const char *origin,
+               const char *kase, int level, uint64_t now, struct actions *out);
+int core_release_alert(struct core *c, unsigned int id, struct actions *out);
+void core_restore_stop(struct core *c, const char *ifname, const char *profile,
+                       int level, unsigned int id);
 void core_reload(struct core *c, const struct config *cfg, uint64_t now,
                  struct actions *out);
 int core_done(const struct core *c);

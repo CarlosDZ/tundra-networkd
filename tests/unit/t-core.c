@@ -502,9 +502,17 @@ static void test_sensor(void) {
 	core_timer(&c, 5100, &out);
 	out.n = 0;
 	core_sensor_exit(&c, "tnd0", EXITED(2), 0, 5200, &out);
-	CHECK(logged("failed 3 times in a row") && dhcpc_sig(SIGUSR1) &&
-	          logged("stopped by an alert of level 5"),
-	      "the third failure in a row stops the connection");
+	CHECK(logged("failed 3 times in a row") && find_act(A_ALERT) &&
+	          find_act(A_ALERT)->alert == AL_STOP &&
+	          find_act(A_ALERT)->level == 5 &&
+	          strcmp(find_act(A_ALERT)->kase, "sensor-down") == 0 &&
+	          tnd0()->sst == S_OFF,
+	      "the third failure in a row raises a sensor-down stop");
+	out.n = 0;
+	core_stop(&c, "tnd0", 5, 1, 5200, &out);
+	CHECK(dhcpc_sig(SIGUSR1) && logged("stopped by an alert of level 5") &&
+	          tnd0()->override == 0,
+	      "which stops the connection without lowering trust");
 	core_child_exit(&c, "tnd0", EXITED(0), 5300, &out);
 	CHECK(st("tnd0") == C_BLOCKED && tnd0()->blocked == B_ALERT,
 	      "and leaves the interface stopped");
@@ -531,7 +539,7 @@ static void test_stop(void) {
 	core_lease(&c, "tnd0", a200, gw, 0, &out);
 
 	out.n = 0;
-	core_stop(&c, "tnd0", 8, 100, &out);
+	core_stop(&c, "tnd0", 8, 1, 100, &out);
 	CHECK(dhcpc_sig(SIGUSR1) && sensor_act(SIGTERM) && count(A_SIGNAL) == 2 &&
 	          st("tnd1") == C_RUNNING,
 	      "level 8 releases only that interface");
@@ -547,7 +555,7 @@ static void test_stop(void) {
 	      "the stopped profile cannot be connected again");
 
 	out.n = 0;
-	core_stop(&c, "tnd1", 9, 500, &out);
+	core_stop(&c, "tnd1", 9, 2, 500, &out);
 	CHECK(dhcpc_sig(SIGUSR1) && c.lockdown &&
 	          logged("stopped by an alert of level 9 on tnd1"),
 	      "level 9 stops every interface");
@@ -570,6 +578,157 @@ static void test_stop(void) {
 	      "and is done once it exits");
 }
 
+static void connect_both(void) {
+	reset("");
+	add("10-a", "tnd0", AUTO);
+	add("20-b", "tnd1", AUTO);
+	core_link(&c, "tnd0", 1, 0, &out);
+	core_link(&c, "tnd1", 1, 0, &out);
+}
+
+static const struct core_iface *ifc(const char *name) {
+	return core_find(&c, name);
+}
+
+static void test_alerts(void) {
+	uint32_t a200 = inet_addr("10.79.0.200"), gw = inet_addr("10.79.0.1");
+	connect_both();
+	core_lease(&c, "tnd0", a200, gw, 0, &out);
+	core_note_alert(&c, "tnd0", 8, 7);
+	core_stop(&c, "tnd0", 8, 7, 100, &out);
+	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(111), 0, 200, &out);
+	CHECK(ifc("tnd0")->stop_id == 7 && ifc("tnd0")->override == 7,
+	      "a stop of level 8 ties the interface to its alert and lowers trust");
+	out.n = 0;
+	CHECK(core_force(&c, 7, "tnd0", "D", 8, 300, &out) == 1 &&
+	          count(A_SPAWN_DHCPC) == 1 && !find_act(A_SPAWN_DHCPC)->probe_off,
+	      "force relaunches tundra-dhcpc for the same profile");
+	out.n = 0;
+	core_lease(&c, "tnd0", a200, gw, 400, &out);
+	CHECK(count(A_SPAWN_SENSOR) == 1 &&
+	          strcmp(find_act(A_SPAWN_SENSOR)->accept, "D/8") == 0 &&
+	          !find_act(A_SPAWN_SENSOR)->defend_always,
+	      "and the sensor with accept D/8");
+	CHECK(ifc("tnd0")->override == 7, "the forced connection stays untrusted");
+	core_stop(&c, "tnd0", 6, 8, 500, &out);
+	core_child_exit(&c, "tnd0", EXITED(0), 600, &out);
+	core_sensor_exit(&c, "tnd0", SIGTERM, 0, 600, &out);
+	core_force(&c, 8, "tnd0", "C", 6, 700, &out);
+	CHECK(ifc("tnd0")->naccepts == 2, "accepts pile up within the connection");
+	core_disconnect(&c, "tnd0", 740, &out);
+	core_child_exit(&c, "tnd0", EXITED(0), 750, &out);
+	core_connect(&c, "10-a", "tnd0", 760, &out);
+	CHECK(ifc("tnd0")->naccepts == 0 && ifc("tnd0")->override == 0,
+	      "a new connection starts without accepts or distrust");
+	core_lease(&c, "tnd0", a200, gw, 800, &out);
+	core_stop(&c, "tnd0", 6, 9, 900, &out);
+	core_child_exit(&c, "tnd0", EXITED(0), 950, &out);
+	core_sensor_exit(&c, "tnd0", SIGTERM, 0, 950, &out);
+	out.n = 0;
+	core_force(&c, 9, "tnd0", "C", 6, 1000, &out);
+	CHECK(find_act(A_SPAWN_DHCPC) && find_act(A_SPAWN_DHCPC)->probe_off,
+	      "forcing a dispute relaunches dhcpc with probe off");
+	out.n = 0;
+	core_lease(&c, "tnd0", a200, gw, 1100, &out);
+	CHECK(find_act(A_SPAWN_SENSOR) && find_act(A_SPAWN_SENSOR)->defend_always &&
+	          strcmp(find_act(A_SPAWN_SENSOR)->accept, "C/6") == 0,
+	      "and the sensor with defend always");
+	CHECK(core_force(&c, 9, "tnd0", "C", 6, 1200, &out) == 0,
+	      "an alert can only be answered once");
+
+	connect_both();
+	core_stop(&c, "tnd0", 8, 3, 100, &out);
+	out.n = 0;
+	CHECK(core_force(&c, 3, "tnd0", "D", 8, 150, &out) == 1 &&
+	          count(A_SPAWN_DHCPC) == 0 &&
+	          strcmp(ifc("tnd0")->pending, "10-a") == 0,
+	      "force before dhcpc has stopped waits for it");
+	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 1, "and relaunches it once it has");
+
+	connect_both();
+	core_stop(&c, "tnd0", 8, 4, 100, &out);
+	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
+	out.n = 0;
+	CHECK(core_release_alert(&c, 4, &out) == 1 && st("tnd0") == C_IDLE &&
+	          ifc("tnd0")->manual_off && ifc("tnd0")->stop_id == 0,
+	      "disconnect leaves the interface as after DISCONNECT");
+	core_link(&c, "tnd0", 1, 300, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 0, "so nothing autoconnects there");
+
+	connect_both();
+	core_stop(&c, "tnd0", 9, 5, 100, &out);
+	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
+	core_child_exit(&c, "tnd1", EXITED(0), 200, &out);
+	out.n = 0;
+	CHECK(
+	    core_force(&c, 5, "tnd0", "X", 9, 300, &out) >= 2 &&
+	        count(A_SPAWN_DHCPC) == 2 && !c.lockdown &&
+	        ifc("tnd0")->naccepts == 1 && ifc("tnd1")->naccepts == 0 &&
+	        ifc("tnd1")->override == 5,
+	    "force on level 9 brings every connection back, accept on the origin");
+
+	connect_both();
+	core_stop(&c, "tnd0", 9, 6, 100, &out);
+	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
+	core_child_exit(&c, "tnd1", EXITED(0), 200, &out);
+	CHECK(core_release_alert(&c, 6, &out) >= 2 && st("tnd1") == C_IDLE &&
+	          ifc("tnd1")->manual_off && !c.lockdown,
+	      "disconnect on level 9 releases every interface");
+
+	connect_both();
+	core_note_alert(&c, "tnd1", 6, 11);
+	CHECK(ifc("tnd1")->override == 11, "a warning of level 6 lowers trust");
+	core_note_alert(&c, "tnd1", 7, 12);
+	CHECK(ifc("tnd1")->override == 11, "the first one is the one shown");
+	core_note_alert(&c, "tnd0", 5, 13);
+	CHECK(ifc("tnd0")->override == 0, "level 5 does not");
+	core_disconnect(&c, "tnd1", 100, &out);
+	CHECK(ifc("tnd1")->override == 0,
+	      "DISCONNECT restores the profile's trust");
+
+	reset("");
+	add("10-a", "tnd0", AUTO);
+	core_restore_stop(&c, "tnd0", "10-a", 8, 21);
+	out.n = 0;
+	core_link(&c, "tnd0", 1, 0, &out);
+	CHECK(st("tnd0") == C_BLOCKED && count(A_SPAWN_DHCPC) == 0 &&
+	          strcmp(ifc("tnd0")->conn.name, "10-a") == 0 &&
+	          ifc("tnd0")->override == 21,
+	      "a stop restored after a restart keeps the interface stopped");
+	CHECK(core_connect(&c, "10-a", "tnd0", 10, &out) == CONNECT_ALERT_PENDING,
+	      "and its profile cannot be connected");
+	CHECK(core_force(&c, 21, "tnd0", "D", 8, 20, &out) == 1 &&
+	          count(A_SPAWN_DHCPC) == 1,
+	      "until the alert is forced");
+
+	reset("");
+	add("10-a", "tnd0", AUTO);
+	core_restore_stop(&c, "tnd9", "-", 9, 22);
+	core_link(&c, "tnd0", 1, 0, &out);
+	CHECK(st("tnd0") == C_BLOCKED && ifc("tnd0")->stop_id == 22,
+	      "a restored level 9 blocks every interface that appears");
+
+	reset("");
+	add("10-a", "tnd0", AUTO);
+	core_link(&c, "tnd0", 1, 0, &out);
+	core_lease(&c, "tnd0", a200, gw, 0, &out);
+	struct core_iface *ci = (struct core_iface *)ifc("tnd0");
+	ci->naccepts = 1;
+	snprintf(ci->accepts[0].kase, sizeof(ci->accepts[0].kase), "sensor-down");
+	ci->accepts[0].level = 5;
+	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 10, &out);
+	core_timer(&c, 1010, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 1020, &out);
+	core_timer(&c, 3020, &out);
+	out.n = 0;
+	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 3030, &out);
+	CHECK(find_act(A_ALERT) && find_act(A_ALERT)->alert == AL_WARN &&
+	          ci->sst == S_BACKOFF && ci->s_fails == 0,
+	      "a forced sensor-down only warns and keeps relaunching");
+}
+
 int main(void) {
 	test_autoconnect();
 	test_managed();
@@ -582,5 +741,6 @@ int main(void) {
 	test_reload();
 	test_sensor();
 	test_stop();
+	test_alerts();
 	return test_summary();
 }

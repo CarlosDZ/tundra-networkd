@@ -1,5 +1,6 @@
 #include "loop.h"
 #include "alert.h"
+#include "alerts.h"
 #include "core.h"
 #include "files.h"
 #include "lease.h"
@@ -18,6 +19,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/signalfd.h>
@@ -36,7 +38,10 @@
 #define T_CHILD 4
 #define T_LISTEN 5
 #define T_CLIENT 6
-#define REPLY_MAX 512
+#define REPLY_MAX 768
+#define ALERTS_PATH TUNDRA_NETWORKD_RUN_DIR "/alerts"
+#define ALERT_ID_PATH TUNDRA_NETWORKD_RUN_DIR "/alert-id"
+#define ALERTS_FILE_MAX (ALERTS_MAX * REPLY_MAX)
 
 struct child {
 	int used;
@@ -68,6 +73,7 @@ struct daemon {
 	struct child kids[CHILDREN_MAX];
 	struct server srv;
 	struct conn_view view[CORE_IFACES];
+	struct alert_store alerts;
 	int dirty;
 	int dns_written;
 	char dns[RESOLV_TEXT_MAX];
@@ -90,10 +96,110 @@ static int watch_fd(struct daemon *d, int fd, uint64_t tag) {
 
 static void execute(struct daemon *d, struct actions *acts);
 
+static int read_file(const char *path, char *buf, size_t size, size_t *len) {
+	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+	if (fd < 0)
+		return -1;
+	*len = 0;
+	ssize_t n;
+	while (*len < size && (n = read(fd, buf + *len, size - *len)) != 0) {
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0) {
+			close(fd);
+			return -1;
+		}
+		*len += (size_t)n;
+	}
+	close(fd);
+	return 0;
+}
+
+static void save_alerts(struct daemon *d) {
+	static char text[ALERTS_FILE_MAX];
+	char line[REPLY_MAX], id[16];
+	size_t used = 0;
+	for (int i = 0; i < d->alerts.n; i++) {
+		int n = alerts_format(&d->alerts.items[i], line, sizeof(line));
+		if (n < 0 || used + (size_t)n + 1 > sizeof(text))
+			continue;
+		memcpy(text + used, line, (size_t)n);
+		used += (size_t)n;
+		text[used++] = '\n';
+	}
+	int n = snprintf(id, sizeof(id), "%u\n", d->alerts.next_id);
+	if (files_make_dirs(TUNDRA_NETWORKD_RUN_DIR, 0755) < 0 ||
+	    files_write_atomic(ALERTS_PATH, text, used, 0600) < 0 ||
+	    files_write_atomic(ALERT_ID_PATH, id, (size_t)n, 0600) < 0)
+		fprintf(stderr, "networkd: cannot save the alerts: %s\n",
+		        strerror(errno));
+}
+
+static void load_alerts(struct daemon *d) {
+	static char text[ALERTS_FILE_MAX];
+	char id[16];
+	size_t len;
+	alerts_init(&d->alerts);
+	if (read_file(ALERTS_PATH, text, sizeof(text), &len) == 0)
+		alerts_load(&d->alerts, text, len);
+	if (read_file(ALERT_ID_PATH, id, sizeof(id) - 1, &len) == 0) {
+		id[len] = '\0';
+		unsigned long next = strtoul(id, NULL, 10);
+		if (next > d->alerts.next_id && next < 0xffffffffUL)
+			d->alerts.next_id = (unsigned int)next;
+	}
+	for (int i = 0; i < d->alerts.n; i++) {
+		const struct stored_alert *sa = &d->alerts.items[i];
+		if (sa->a.action == AL_STOP)
+			core_restore_stop(&d->core, sa->a.on, sa->profile, sa->a.level,
+			                  sa->id);
+	}
+	if (d->alerts.n)
+		printf("networkd: %d pending alerts restored\n", d->alerts.n);
+}
+
+static void take_alert(struct daemon *d, const char *ifname,
+                       const struct alert *a, const char *line) {
+	const struct core_iface *ci = core_find(&d->core, ifname);
+	const char *profile = ci && ci->st != C_IDLE ? ci->profile : "-";
+	struct actions acts = {0};
+	char fwd[REPLY_MAX];
+	unsigned int id = alerts_add(&d->alerts, profile, a, line);
+	save_alerts(d);
+	printf("networkd: %s: alert %u recorded\n", ifname, id);
+	if (alerts_format(alerts_find(&d->alerts, id), fwd, sizeof(fwd)) >= 0)
+		server_broadcast(&d->srv, fwd);
+	core_note_alert(&d->core, ifname, a->level, id);
+	if (a->action == AL_STOP) {
+		core_stop(&d->core, ifname, a->level, id, now_ms(), &acts);
+		execute(d, &acts);
+	}
+	d->dirty = 1;
+}
+
+static void own_alert(struct daemon *d, const struct action *act) {
+	struct timespec ts;
+	char line[OUT_LINE_MAX];
+	struct alert a;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	int stop = act->alert == AL_STOP;
+	snprintf(line, sizeof(line),
+	         "alert 111/%d %s by tundra-networkd on %s ts %lld.%03ld reply %s "
+	         "info case %s %s -- %s",
+	         act->level, stop ? "stop" : "warn", act->iface,
+	         (long long)ts.tv_sec, ts.tv_nsec / 1000000,
+	         stop ? "force,disconnect" : "ack,disconnect", act->kase, act->msg,
+	         strcmp(act->kase, "sensor-down") == 0
+	             ? "tundra-blueice-arp keeps failing"
+	             : act->kase);
+	printf("networkd: %s\n", line);
+	if (alert_parse(line, &a) == 0)
+		take_alert(d, act->iface, &a, line);
+}
+
 static void handle_alert(struct daemon *d, struct child *k) {
 	const char *from =
 	    k->kind == K_SENSOR ? "tundra-blueice-arp" : "tundra-dhcpc";
-	struct actions acts = {0};
 	struct alert a;
 	if (alert_parse(k->line, &a) < 0) {
 		printf("networkd: %s: malformed alert from %s discarded\n", k->ifname,
@@ -105,10 +211,12 @@ static void handle_alert(struct daemon *d, struct child *k) {
 		       k->ifname, a.by, from);
 		return;
 	}
-	if (a.action == AL_STOP) {
-		core_stop(&d->core, k->ifname, a.level, now_ms(), &acts);
-		execute(d, &acts);
+	if (strcmp(a.on, k->ifname) != 0) {
+		printf("networkd: %s: alert on %s discarded on the pipe of %s\n",
+		       k->ifname, a.on, from);
+		return;
 	}
+	take_alert(d, k->ifname, &a, k->line);
 }
 
 static void emit_line(struct daemon *d, struct child *k) {
@@ -194,7 +302,7 @@ static struct child *new_child(struct daemon *d, const char *path,
 
 static void spawn_sensor(struct daemon *d, const struct action *a) {
 	char addr[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
-	char *argv[12];
+	char *argv[14];
 	int n = 0;
 	inet_ntop(AF_INET, &a->addr, addr, sizeof(addr));
 	inet_ntop(AF_INET, &a->gw, gw, sizeof(gw));
@@ -208,7 +316,11 @@ static void spawn_sensor(struct daemon *d, const struct action *a) {
 		argv[n++] = gw;
 	}
 	argv[n++] = "defend";
-	argv[n++] = "once";
+	argv[n++] = a->defend_always ? "always" : "once";
+	if (a->accept[0]) {
+		argv[n++] = "accept";
+		argv[n++] = (char *)a->accept;
+	}
 	argv[n] = NULL;
 
 	struct child *k =
@@ -227,7 +339,7 @@ static void spawn_sensor(struct daemon *d, const struct action *a) {
 
 static void spawn_dhcpc(struct daemon *d, const struct action *a) {
 	char metric[16], grace[16];
-	char *argv[16];
+	char *argv[18];
 	int n = 0;
 	argv[n++] = "tundra-dhcpc";
 	argv[n++] = (char *)a->iface;
@@ -244,6 +356,10 @@ static void spawn_dhcpc(struct daemon *d, const struct action *a) {
 		snprintf(grace, sizeof(grace), "%u", a->grace_ms);
 		argv[n++] = "carrier-grace";
 		argv[n++] = grace;
+	}
+	if (a->probe_off) {
+		argv[n++] = "probe";
+		argv[n++] = "off";
 	}
 	argv[n++] = "lease-key";
 	argv[n++] = (char *)a->profile;
@@ -279,6 +395,9 @@ static void execute(struct daemon *d, struct actions *acts) {
 			if ((k = running_child(d, a->iface, a->kind)))
 				kill(k->pid, a->sig);
 			d->dirty = 1;
+			break;
+		case A_ALERT:
+			own_alert(d, a);
 			break;
 		case A_LOG:
 			printf("networkd: %s\n", a->msg);
@@ -378,22 +497,7 @@ static int read_lease(const char *ifname, const char *profile, char *buf,
 	char path[PATH_MAX];
 	snprintf(path, sizeof(path), "%s/%s-%s.lease", DHCPC_LEASE_DIR, ifname,
 	         profile);
-	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-	if (fd < 0)
-		return -1;
-	*len = 0;
-	ssize_t n;
-	while (*len < size && (n = read(fd, buf + *len, size - *len)) != 0) {
-		if (n < 0 && errno == EINTR)
-			continue;
-		if (n < 0) {
-			close(fd);
-			return -1;
-		}
-		*len += (size_t)n;
-	}
-	close(fd);
-	return 0;
+	return read_file(path, buf, size, len);
 }
 
 static void log_dns(const char *text) {
@@ -485,7 +589,11 @@ static void reply_status(struct daemon *d, int client) {
 		    .connected = d->view[i].connected,
 		    .address = d->view[i].connected ? d->view[i].address : NULL,
 		    .kept = ci->kept,
+		    .override = ci->override,
 		};
+		char ids[REPLY_MAX];
+		if (alerts_ids_on(&d->alerts, ci->name, ids, sizeof(ids)) == 0)
+			v.alerts = ids;
 		if (err) {
 			snprintf(why, sizeof(why), "interfaces: %s", err);
 			v.unmanaged = why;
@@ -539,6 +647,47 @@ static int do_reload(struct daemon *d) {
 	return 0;
 }
 
+static void reply_alerts(struct daemon *d, int client) {
+	char line[REPLY_MAX];
+	for (int i = 0; i < d->alerts.n; i++)
+		if (alerts_format(&d->alerts.items[i], line, sizeof(line)) >= 0)
+			server_send(&d->srv, client, line);
+	server_send(&d->srv, client, "OK");
+}
+
+static const char *do_reply(struct daemon *d, const struct cmd *cmd) {
+	char *end;
+	unsigned long id = strtoul(cmd->args[0], &end, 10);
+	const struct stored_alert *sa = *end || !id || id > 0xffffffffUL
+	                                    ? NULL
+	                                    : alerts_find(&d->alerts, (unsigned)id);
+	const char *opt = cmd->args[1];
+	struct actions acts = {0};
+	if (!sa)
+		return "ERROR unknown alert";
+	if (!alerts_offers(sa, opt))
+		return "ERROR option not offered by that alert";
+
+	struct stored_alert copy = *sa;
+	uint64_t now = now_ms();
+	if (copy.a.action == AL_STOP && strcmp(opt, "force") == 0) {
+		core_force(&d->core, copy.id, copy.a.on, copy.a.kase, copy.a.level, now,
+		           &acts);
+	} else if (copy.a.action == AL_STOP && strcmp(opt, "disconnect") == 0) {
+		core_release_alert(&d->core, copy.id, &acts);
+	} else if (strcmp(opt, "disconnect") == 0) {
+		const struct core_iface *ci = core_find(&d->core, copy.a.on);
+		if (ci && ci->st != C_IDLE && strcmp(ci->profile, copy.profile) == 0)
+			core_disconnect(&d->core, copy.a.on, now, &acts);
+	}
+	alerts_remove(&d->alerts, copy.id);
+	save_alerts(d);
+	printf("networkd: alert %u answered with %s\n", copy.id, opt);
+	execute(d, &acts);
+	d->dirty = 1;
+	return NULL;
+}
+
 static void on_command(void *ctx, int client, const char *line) {
 	struct daemon *d = ctx;
 	struct actions acts = {0};
@@ -579,10 +728,11 @@ static void on_command(void *ctx, int client, const char *line) {
 		server_send(&d->srv, client, "OK");
 		return;
 	case CMD_ALERTS:
-		server_send(&d->srv, client, "OK");
+		reply_alerts(d, client);
 		return;
 	case CMD_ALERT_REPLY:
-		server_send(&d->srv, client, "ERROR unknown alert");
+		err = do_reply(d, &cmd);
+		server_send(&d->srv, client, err ? err : "OK");
 		return;
 	}
 }
@@ -657,6 +807,7 @@ int loop_run(struct config *cfg) {
 	for (int i = 0; i < CHILDREN_MAX; i++)
 		d.kids[i].fd = -1;
 	core_init(&d.core, cfg);
+	load_alerts(&d);
 	d.dirty = 1;
 	report_config(cfg);
 

@@ -108,13 +108,19 @@ int proto_status(const struct iface_view *v, char *out, size_t size) {
 		lead = "previous configuration kept: ";
 		note = v->kept;
 	}
-	int n = snprintf(
-	    out, size, "iface %s state %s%s profile %s address %s trusted %s%s%s%s",
-	    ci->name, state_name(v),
-	    ci->st == C_BLOCKED ? block_reason(ci->blocked) : "",
-	    v->p ? v->p->name : "-", v->address ? v->address : "-",
-	    v->p ? (v->p->trusted ? "yes" : "no") : "-", note ? " -- " : "", lead,
-	    note ? note : "");
+	char override[16] = "-";
+	if (v->p && v->override)
+		snprintf(override, sizeof(override), "%u", v->override);
+	int n =
+	    snprintf(out, size,
+	             "iface %s state %s%s profile %s address %s trusted %s "
+	             "override %s alert %s%s%s%s",
+	             ci->name, state_name(v),
+	             ci->st == C_BLOCKED ? block_reason(ci->blocked) : "",
+	             v->p ? v->p->name : "-", v->address ? v->address : "-",
+	             v->p ? (v->p->trusted && !v->override ? "yes" : "no") : "-",
+	             override, v->alerts ? v->alerts : "-", note ? " -- " : "",
+	             lead, note ? note : "");
 	return fit(n, size);
 }
 

@@ -18,11 +18,14 @@ static int bad(const char *line, const char *error) {
 }
 
 static const char *kept;
+static unsigned int override;
+static const char *alerts;
 
 static int status(struct core_iface *ci, const struct profile *p, int conn,
                   const char *addr, const char *unmanaged, const char *want) {
 	char out[512];
-	struct iface_view v = {ci, p, conn, addr, unmanaged, kept};
+	struct iface_view v = {ci,        p,    conn,     addr,
+	                       unmanaged, kept, override, alerts};
 	return proto_status(&v, out, sizeof(out)) >= 0 && strcmp(out, want) == 0;
 }
 
@@ -59,48 +62,71 @@ int main(void) {
 	struct core_iface ci = {.name = "enp8s0", .st = C_RUNNING};
 	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
 	             "iface enp8s0 state connected profile casa address "
-	             "10.79.0.100/24 trusted no"),
+	             "10.79.0.100/24 trusted no override - alert -"),
 	      "a connected interface");
 	CHECK(status(&ci, &p, 0, NULL, NULL,
 	             "iface enp8s0 state connecting profile casa address - "
-	             "trusted no"),
+	             "trusted no override - alert -"),
 	      "a connection without lease");
 	kept = "profile casa has errors";
 	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
 	             "iface enp8s0 state connected profile casa address "
-	             "10.79.0.100/24 trusted no -- previous configuration kept: "
+	             "10.79.0.100/24 trusted no override - alert - -- previous "
+	             "configuration kept: "
 	             "profile casa has errors"),
 	      "a connection kept by a reload says so");
 	kept = NULL;
 	ci.st = C_IDLE;
 	CHECK(status(&ci, NULL, 0, NULL, NULL,
-	             "iface enp8s0 state idle profile - address - trusted -"),
+	             "iface enp8s0 state idle profile - address - trusted - "
+	             "override - alert -"),
 	      "an idle interface");
 	CHECK(status(&ci, NULL, 0, NULL, "interfaces: line 2: unknown key wifi",
 	             "iface enp8s0 state unmanaged profile - address - trusted - "
+	             "override - alert - "
 	             "-- interfaces: line 2: unknown key wifi"),
 	      "an unmanaged interface carries its error");
 	ci.st = C_BLOCKED;
 	ci.blocked = B_CONFIG;
 	CHECK(status(&ci, &p, 0, NULL, NULL,
 	             "iface enp8s0 state blocked reason config profile casa "
-	             "address - trusted no"),
+	             "address - trusted no override - alert -"),
 	      "a blocked interface carries its reason");
 	ci.st = C_BACKOFF;
 	CHECK(status(&ci, &p, 0, NULL, "x",
 	             "iface enp8s0 state retrying profile casa address - "
-	             "trusted no"),
+	             "trusted no override - alert -"),
 	      "retrying, and the unmanaged error only shows when idle");
 	ci.st = C_WAIT_LINK;
 	CHECK(status(&ci, &p, 0, NULL, NULL,
 	             "iface enp8s0 state waiting profile casa address - "
-	             "trusted no"),
+	             "trusted no override - alert -"),
 	      "waiting for the interface");
 	ci.st = C_STOPPING;
 	CHECK(status(&ci, &p, 0, NULL, NULL,
 	             "iface enp8s0 state stopping profile casa address - "
-	             "trusted no"),
+	             "trusted no override - alert -"),
 	      "stopping");
+
+	ci.st = C_RUNNING;
+	override = 7;
+	alerts = "7,9";
+	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
+	             "iface enp8s0 state connected profile casa address "
+	             "10.79.0.100/24 trusted no override 7 alert 7,9"),
+	      "an alert lowers trust and pending alerts are listed");
+	p.trusted = 1;
+	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
+	             "iface enp8s0 state connected profile casa address "
+	             "10.79.0.100/24 trusted no override 7 alert 7,9"),
+	      "even on a trusted profile");
+	override = 0;
+	alerts = NULL;
+	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
+	             "iface enp8s0 state connected profile casa address "
+	             "10.79.0.100/24 trusted yes override - alert -"),
+	      "a trusted profile without alerts");
+	p.trusted = 0;
 
 	char out[512];
 	CHECK(proto_profile(&p, out, sizeof(out)) >= 0 &&

@@ -96,6 +96,41 @@ static void begin_stop(struct core_iface *ci, int sig, uint64_t now,
 	signal_child(out, ci, sig);
 }
 
+static void end_conn(struct core_iface *ci) {
+	ci->naccepts = 0;
+	ci->dispute = 0;
+	ci->override = 0;
+	ci->s_fails = 0;
+	ci->s_backoff_ms = BACKOFF_MIN_MS;
+}
+
+static int accepted(const struct core_iface *ci, const char *kase, int level) {
+	for (int i = 0; i < ci->naccepts; i++)
+		if (strcmp(ci->accepts[i].kase, kase) == 0 &&
+		    ci->accepts[i].level >= level)
+			return 1;
+	return 0;
+}
+
+static void add_accept(struct core_iface *ci, const char *kase, int level) {
+	for (int i = 0; i < ci->naccepts; i++)
+		if (strcmp(ci->accepts[i].kase, kase) == 0) {
+			if (level > ci->accepts[i].level)
+				ci->accepts[i].level = level;
+			return;
+		}
+	if (ci->naccepts == ACCEPTS_MAX)
+		return;
+	struct accept *a = &ci->accepts[ci->naccepts++];
+	snprintf(a->kase, sizeof(a->kase), "%s", kase);
+	a->level = level;
+}
+
+static int is_dispute(const char *kase) {
+	return strcmp(kase, "A") == 0 || strcmp(kase, "B") == 0 ||
+	       strcmp(kase, "C") == 0 || strcmp(kase, "mac-addr") == 0;
+}
+
 static void sensor_signal(struct actions *out, const struct core_iface *ci,
                           int sig) {
 	struct action *a = push(out, A_SIGNAL, ci);
@@ -126,6 +161,16 @@ static void sensor_sync(struct core_iface *ci, uint64_t now,
 		a->kind = K_SENSOR;
 		a->addr = ci->want_addr;
 		a->gw = ci->want_gw;
+		a->defend_always = ci->dispute;
+		size_t used = 0;
+		for (int i = 0; i < ci->naccepts; i++) {
+			int w = snprintf(a->accept + used, sizeof(a->accept) - used,
+			                 "%s%s/%d", i ? "," : "", ci->accepts[i].kase,
+			                 ci->accepts[i].level);
+			if (w < 0 || (size_t)w >= sizeof(a->accept) - used)
+				break;
+			used += (size_t)w;
+		}
 		ci->sst = S_RUNNING;
 		ci->s_addr = ci->want_addr;
 		ci->s_gw = ci->want_gw;
@@ -167,6 +212,7 @@ static void spawn_with(struct core_iface *ci, const struct profile *p,
 	if (!a)
 		return;
 	snprintf(a->profile, sizeof(a->profile), "%s", p->name);
+	a->probe_off = ci->dispute;
 	if (conf) {
 		a->has_metric = conf->has_metric;
 		a->metric = conf->metric;
@@ -202,8 +248,10 @@ static void try_autoconnect(struct core *c, struct core_iface *ci, uint64_t now,
 	    ci->manual_off || ci->blocked != B_NONE || !managed(c, ci, &conf))
 		return;
 	const struct profile *p = autoselect(c, ci);
-	if (p)
+	if (p) {
+		end_conn(ci);
 		spawn(c, ci, p, now, out);
+	}
 }
 
 static void resume(struct core *c, struct core_iface *ci, uint64_t now,
@@ -247,6 +295,7 @@ void core_link(struct core *c, const char *ifname, int physical, uint64_t now,
 	if (c->lockdown && ci->st == C_IDLE) {
 		ci->st = C_BLOCKED;
 		ci->blocked = B_ALERT;
+		ci->stop_id = c->lockdown_id;
 	}
 	if (ci->st == C_WAIT_LINK)
 		resume(c, ci, now, out);
@@ -391,6 +440,10 @@ enum connect_result core_connect(struct core *c, const char *profile,
 	if (ci->blocked == B_ALERT && strcmp(ci->profile, p->name) == 0)
 		return CONNECT_ALERT_PENDING;
 
+	if (ci->st != C_RUNNING || strcmp(ci->profile, p->name) != 0) {
+		end_conn(ci);
+		ci->stop_id = 0;
+	}
 	ci->manual_off = 0;
 	switch (ci->st) {
 	case C_RUNNING:
@@ -422,6 +475,7 @@ int core_disconnect(struct core *c, const char *ifname, uint64_t now,
 		return -1;
 	ci->manual_off = 1;
 	ci->pending[0] = '\0';
+	end_conn(ci);
 	switch (ci->st) {
 	case C_RUNNING:
 		begin_stop(ci, SIGUSR1, now, out);
@@ -539,6 +593,7 @@ static void reload_iface(struct core *c, struct core_iface *ci, uint64_t now,
 	char why[CONF_ERR_MAX];
 	if (!p) {
 		ci->kept[0] = '\0';
+		end_conn(ci);
 		log_msg(out, ci, "profile %s removed, disconnecting", ci->profile);
 		if (ci->st == C_RUNNING)
 			begin_stop(ci, SIGUSR1, now, out);
@@ -560,6 +615,7 @@ static void reload_iface(struct core *c, struct core_iface *ci, uint64_t now,
 		ci->conn = *p;
 		return;
 	}
+	end_conn(ci);
 	if (ci->st != C_RUNNING)
 		return;
 	if (matches(p, ci)) {
@@ -598,8 +654,12 @@ void core_lease(struct core *c, const char *ifname, uint32_t addr, uint32_t gw,
 		sensor_sync(ci, now, out);
 }
 
-static void stop_one(struct core_iface *ci, uint64_t now, struct actions *out) {
+static void stop_one(struct core_iface *ci, int level, unsigned int id,
+                     uint64_t now, struct actions *out) {
 	ci->pending[0] = '\0';
+	if (level >= TRUST_LEVEL && ci->st != C_IDLE && !ci->override)
+		ci->override = id;
+	ci->stop_id = id;
 	if (ci->st == C_RUNNING) {
 		ci->alert_stop = 1;
 		begin_stop(ci, SIGUSR1, now, out);
@@ -613,12 +673,13 @@ static void stop_one(struct core_iface *ci, uint64_t now, struct actions *out) {
 	sensor_stop(ci, now, out);
 }
 
-void core_stop(struct core *c, const char *ifname, int level, uint64_t now,
-               struct actions *out) {
+void core_stop(struct core *c, const char *ifname, int level, unsigned int id,
+               uint64_t now, struct actions *out) {
 	if (level >= ALERT_ALL_LEVEL) {
 		c->lockdown = 1;
+		c->lockdown_id = id;
 		for (int i = 0; i < c->n; i++) {
-			stop_one(&c->ifs[i], now, out);
+			stop_one(&c->ifs[i], level, id, now, out);
 			log_msg(out, &c->ifs[i], "stopped by an alert of level %d on %s",
 			        level, ifname);
 		}
@@ -627,8 +688,108 @@ void core_stop(struct core *c, const char *ifname, int level, uint64_t now,
 	struct core_iface *ci = find(c, ifname);
 	if (!ci)
 		return;
-	stop_one(ci, now, out);
+	stop_one(ci, level, id, now, out);
 	log_msg(out, ci, "stopped by an alert of level %d", level);
+}
+
+void core_note_alert(struct core *c, const char *ifname, int level,
+                     unsigned int id) {
+	struct core_iface *ci = find(c, ifname);
+	if (ci && level >= TRUST_LEVEL && ci->st != C_IDLE && !ci->override)
+		ci->override = id;
+}
+
+int core_force(struct core *c, unsigned int id, const char *origin,
+               const char *kase, int level, uint64_t now, struct actions *out) {
+	int n = 0;
+	if (c->lockdown && c->lockdown_id == id) {
+		c->lockdown = 0;
+		c->lockdown_id = 0;
+	}
+	for (int i = 0; i < c->n; i++) {
+		struct core_iface *ci = &c->ifs[i];
+		if (ci->stop_id != id)
+			continue;
+		n++;
+		ci->stop_id = 0;
+		if (strcmp(ci->name, origin) == 0) {
+			add_accept(ci, kase, level);
+			if (is_dispute(kase))
+				ci->dispute = 1;
+			ci->s_fails = 0;
+			ci->s_backoff_ms = BACKOFF_MIN_MS;
+		}
+		if (ci->st == C_STOPPING) {
+			ci->alert_stop = 0;
+			memcpy(ci->pending, ci->profile, sizeof(ci->pending));
+			continue;
+		}
+		if (ci->st != C_BLOCKED || ci->blocked != B_ALERT)
+			continue;
+		ci->st = C_IDLE;
+		ci->blocked = B_NONE;
+		const struct profile *p =
+		    ci->profile[0] ? profile_by_name(c, ci->profile) : NULL;
+		const struct iface_conf *conf;
+		if (!p || !matches(p, ci) || !managed(c, ci, &conf))
+			try_autoconnect(c, ci, now, out);
+		else if (!ci->present)
+			ci->st = C_WAIT_LINK;
+		else
+			spawn(c, ci, p, now, out);
+		log_msg(out, ci, "alert %u forced, reconnecting", id);
+	}
+	return n;
+}
+
+int core_release_alert(struct core *c, unsigned int id, struct actions *out) {
+	int n = 0;
+	if (c->lockdown && c->lockdown_id == id) {
+		c->lockdown = 0;
+		c->lockdown_id = 0;
+	}
+	for (int i = 0; i < c->n; i++) {
+		struct core_iface *ci = &c->ifs[i];
+		if (ci->stop_id != id)
+			continue;
+		n++;
+		end_conn(ci);
+		ci->stop_id = 0;
+		ci->manual_off = 1;
+		ci->pending[0] = '\0';
+		if (ci->st == C_STOPPING) {
+			ci->alert_stop = 0;
+		} else if (ci->st == C_BLOCKED && ci->blocked == B_ALERT) {
+			ci->st = C_IDLE;
+			ci->blocked = B_NONE;
+		}
+		log_msg(out, ci, "alert %u answered with disconnect", id);
+	}
+	return n;
+}
+
+void core_restore_stop(struct core *c, const char *ifname, const char *profile,
+                       int level, unsigned int id) {
+	if (level >= ALERT_ALL_LEVEL) {
+		c->lockdown = 1;
+		c->lockdown_id = id;
+	}
+	struct core_iface *ci = find_or_add(c, ifname);
+	if (!ci)
+		return;
+	ci->st = C_BLOCKED;
+	ci->blocked = B_ALERT;
+	ci->stop_id = id;
+	if (strcmp(profile, "-") != 0) {
+		const struct profile *p = profile_by_name(c, profile);
+		if (p)
+			ci->conn = *p;
+		else
+			snprintf(ci->conn.name, sizeof(ci->conn.name), "%s", profile);
+		snprintf(ci->profile, sizeof(ci->profile), "%s", profile);
+		if (level >= TRUST_LEVEL)
+			ci->override = id;
+	}
 }
 
 void core_sensor_exit(struct core *c, const char *ifname, int status,
@@ -669,8 +830,17 @@ void core_sensor_exit(struct core *c, const char *ifname, int status,
 	if (ci->s_fails >= SENSOR_FAILS_MAX) {
 		log_msg(out, ci, "tundra-blueice-arp failed %d times in a row",
 		        ci->s_fails);
-		core_stop(c, ci->name, SENSOR_DOWN_LEVEL, now, out);
-		return;
+		int covered = accepted(ci, "sensor-down", SENSOR_DOWN_LEVEL);
+		struct action *a = push(out, A_ALERT, ci);
+		if (a) {
+			a->alert = covered ? AL_WARN : AL_STOP;
+			a->level = SENSOR_DOWN_LEVEL;
+			snprintf(a->kase, sizeof(a->kase), "sensor-down");
+			snprintf(a->msg, sizeof(a->msg), "fails %d", ci->s_fails);
+		}
+		if (!covered)
+			return;
+		ci->s_fails = 0;
 	}
 	ci->sst = S_BACKOFF;
 	ci->s_retry_at = now + ci->s_backoff_ms;

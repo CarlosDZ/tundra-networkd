@@ -77,13 +77,29 @@ int main(int argc, char *argv[]) {
 		printf("conflict addr %s mac 02:aa:aa:aa:aa:01\n", addr);
 		return 1;
 	}
-	if (strncmp(mode, "stop", 4) == 0) {
+	char verb[16], kase[32];
+	int level = 0;
+	if (sscanf(mode, "%15[^:]:%31[^:]:%d", verb, kase, &level) == 3) {
+		char want[48];
+		const char *acc = arg_after(argc, argv, "accept");
+		int covered = 0;
+		for (int l = level; l <= 10 && !covered; l++) {
+			snprintf(want, sizeof(want), "%s/%d", kase, l);
+			const char *hit = strstr(acc, want);
+			size_t wl = strlen(want);
+			covered = hit && (hit == acc || hit[-1] == ',') &&
+			          (hit[wl] == '\0' || hit[wl] == ',');
+		}
+		int stop = strcmp(verb, "stop") == 0 && !covered;
 		set_mode("run");
 		fprintf(stderr,
-		        "alert 111/%s stop by tundra-blueice-arp on %s ts 0.000 reply "
-		        "force,disconnect info case D gw %s -- gateway impersonation\n",
-		        mode + 4, ifname, arg_after(argc, argv, "gw"));
-		return 111;
+		        "alert 111/%d %s by tundra-blueice-arp on %s ts 0.000 reply %s "
+		        "info case %s gw %s -- fake %s\n",
+		        level, stop ? "stop" : "warn", ifname,
+		        stop ? "force,disconnect" : "ack,disconnect", kase,
+		        arg_after(argc, argv, "gw"), kase);
+		if (stop)
+			return 111;
 	}
 	if (strcmp(mode, "forge") == 0) {
 		set_mode("run");
