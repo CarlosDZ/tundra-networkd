@@ -20,7 +20,10 @@ SENSOR_HISTORY=/run/tundra/blueice/arp
 SOCK=/run/tundra-test/network.socket
 DHCPC_FAKE_DIR=$WORK/fake
 DHCPC_REAL=${DHCPC_REAL:-$ROOT/../tundra-dhcpc/build/test/tundra-dhcpc}
-export DHCPC_FAKE_DIR DHCPC_REAL
+BIARP_FAKE_DIR=$WORK/biarp
+BIARP_REAL=${BIARP_REAL:-$ROOT/../tundra-blueice-arp/build/test/tundra-blueice-arp}
+ARPSEND=${ARPSEND:-$ROOT/../tundra-blueice-arp/build/test/tools/arpsend}
+export DHCPC_FAKE_DIR DHCPC_REAL BIARP_FAKE_DIR BIARP_REAL
 
 PASS=0
 FAIL=0
@@ -99,6 +102,10 @@ has_addr() {
 	[ -n "$(ns_addr)" ]
 }
 
+no_addr() {
+	[ -z "$(ns_addr)" ]
+}
+
 start_dnsmasq() {
 	dnsmasq --interface="$BR" --bind-interfaces --port=0 --no-ping \
 		--dhcp-range="${DHCP_RANGE:-$NET.100,$NET.150,2m}" \
@@ -144,6 +151,31 @@ fake() {
 
 launches() {
 	cat "$DHCPC_FAKE_DIR/launches" 2>/dev/null | wc -l
+}
+
+sensor() {
+	mkdir -p "$BIARP_FAKE_DIR"
+	echo "$1" >"$BIARP_FAKE_DIR/mode"
+}
+
+sensor_launches() {
+	cat "$BIARP_FAKE_DIR/launches" 2>/dev/null | wc -l
+}
+
+sensor_launched() {
+	[ "$(sensor_launches)" -ge "$1" ]
+}
+
+last_sensor() {
+	tail -n 1 "$BIARP_FAKE_DIR/launches" 2>/dev/null
+}
+
+dhcpc_got() {
+	grep -q "^$1 $2\$" "$DHCPC_FAKE_DIR/signals" 2>/dev/null
+}
+
+sensor_got() {
+	grep -q "^$1 $2\$" "$BIARP_FAKE_DIR/signals" 2>/dev/null
 }
 
 launched() {
@@ -236,8 +268,11 @@ add_if() {
 
 write_lease() {
 	mkdir -p "$LEASES"
-	printf 'address=%s\nmask=255.255.255.0\ndns=%s\nlease=3600\n' \
-		"$NET.200" "$2" >"$LEASES/$1.lease.tmp"
+	{
+		printf 'address=%s\nmask=255.255.255.0\n' "${3:-$NET.200}"
+		[ -n "${4:-}" ] && printf 'router=%s\n' "$4"
+		printf 'dns=%s\nlease=3600\n' "$2"
+	} >"$LEASES/$1.lease.tmp"
 	mv "$LEASES/$1.lease.tmp" "$LEASES/$1.lease"
 }
 
@@ -262,7 +297,8 @@ teardown_net() {
 	ip link del "${IF2}p" 2>/dev/null
 	ip link del "${EVIF}p" 2>/dev/null
 	ip link del "$BR" 2>/dev/null
-	rm -rf "$CONF" "$RUN" "$SYS" "$DHCPC_FAKE_DIR" "$(dirname "$SOCK")"
+	rm -rf "$CONF" "$RUN" "$SYS" "$DHCPC_FAKE_DIR" "$BIARP_FAKE_DIR" \
+		"$(dirname "$SOCK")"
 	rm -f "$LEASES/$IF".lease "$LEASES/$IF"-*.lease "$LEASES/$IF2"-*.lease
 	rm -f "$SENSOR_HISTORY/$IF" "$SENSOR_HISTORY/$IF.lock"
 	return 0

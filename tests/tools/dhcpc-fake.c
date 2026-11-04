@@ -8,9 +8,14 @@
 #include <unistd.h>
 
 static char dir[512];
-static volatile sig_atomic_t got;
+static volatile sig_atomic_t got, got_usr2;
 
 static void on_signal(int sig) { got = sig; }
+
+static void on_usr2(int sig) {
+	(void)sig;
+	got_usr2 = 1;
+}
 
 static FILE *open_in(const char *name, const char *mode) {
 	char path[600];
@@ -90,18 +95,42 @@ int main(int argc, char *argv[]) {
 		printf("fake exiting with %s\n", mode + 4);
 		return atoi(mode + 4);
 	}
+	if (strcmp(mode, "alert") == 0) {
+		fprintf(stderr,
+		        "alert 111/4 stop by tundra-blueice-arp on %s ts 0.000 reply "
+		        "force,disconnect info case A mac 02:aa:aa:aa:aa:01 -- single "
+		        "host claiming addresses\n",
+		        argv[1]);
+		return 111;
+	}
+	if (strcmp(mode, "forge") == 0)
+		fprintf(stderr,
+		        "alert 111/9 stop by tundra-evil on %s ts 0.000 reply "
+		        "force,disconnect info case x -- forged\n",
+		        argv[1]);
 
 	struct sigaction sa = {.sa_handler = on_signal};
 	if (strcmp(mode, "stubborn") == 0)
 		sa.sa_handler = SIG_IGN;
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGUSR1, &sa, NULL);
+	struct sigaction sa2 = {.sa_handler = on_usr2};
+	sigaction(SIGUSR2, &sa2, NULL);
 	printf("fake running\n");
 	fflush(stdout);
 
 	struct timespec tick = {0, 100000000};
-	while (!got && if_nametoindex(argv[1]))
+	while (!got && if_nametoindex(argv[1])) {
 		nanosleep(&tick, NULL);
+		if (got_usr2) {
+			got_usr2 = 0;
+			FILE *f = open_in("signals", "a");
+			if (f) {
+				fprintf(f, "%d USR2\n", (int)getpid());
+				fclose(f);
+			}
+		}
+	}
 	if (got) {
 		FILE *f = open_in("signals", "a");
 		if (f) {

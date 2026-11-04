@@ -61,5 +61,7 @@ make check
   re-executes itself with `sudo`), `iproute2` and `dnsmasq`.
 - The DHCP scenarios run the test build of `tundra-dhcpc` found at
   `../tundra-dhcpc/build/test/tundra-dhcpc` (its own `make check` leaves it
-  there), or the binary in `DHCPC_REAL`. The others use a fake dhcpc built from
-  `tests/tools/dhcpc-fake.c`.
+  there), or the binary in `DHCPC_REAL`. The attack scenario also runs the test
+  build of `tundra-blueice-arp` and its `arpsend` tool from
+  `../tundra-blueice-arp/build/test/` (or `BIARP_REAL`). The others use fakes
+  built from `tests/tools/`.

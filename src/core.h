@@ -14,6 +14,9 @@
 #define BACKOFF_MAX_MS 60000
 #define STABLE_MS 60000
 #define STOP_TIMEOUT_MS 5000
+#define SENSOR_FAILS_MAX 3
+#define SENSOR_DOWN_LEVEL 5
+#define ALERT_ALL_LEVEL 9
 
 enum conn_state {
 	C_IDLE,
@@ -24,6 +27,8 @@ enum conn_state {
 	C_BLOCKED
 };
 
+enum sensor_state { S_OFF, S_RUNNING, S_STOPPING, S_BACKOFF };
+enum child_kind { K_DHCPC, K_SENSOR };
 enum block_reason { B_NONE, B_CONFIG, B_EXITED, B_ALERT, B_UNSUPPORTED };
 
 struct core_iface {
@@ -43,6 +48,18 @@ struct core_iface {
 	struct iface_conf conn_conf;
 	int has_conn_conf;
 	char kept[CONF_ERR_MAX + 48];
+	int alert_stop;
+	enum sensor_state sst;
+	uint32_t want_addr;
+	uint32_t want_gw;
+	uint32_t conflict_addr;
+	uint32_t s_addr;
+	uint32_t s_gw;
+	unsigned int s_backoff_ms;
+	int s_fails;
+	uint64_t s_started_at;
+	uint64_t s_retry_at;
+	uint64_t s_stop_at;
 };
 
 struct core {
@@ -50,12 +67,14 @@ struct core {
 	struct core_iface ifs[CORE_IFACES];
 	int n;
 	int shutting_down;
+	int lockdown;
 };
 
-enum act_type { A_SPAWN_DHCPC, A_SIGNAL, A_LOG };
+enum act_type { A_SPAWN_DHCPC, A_SPAWN_SENSOR, A_SIGNAL, A_LOG };
 
 struct action {
 	enum act_type type;
+	enum child_kind kind;
 	char iface[IF_NAMESIZE];
 	char profile[PROFILE_NAME_MAX + 1];
 	int sig;
@@ -64,6 +83,8 @@ struct action {
 	int has_table;
 	char table[TABLE_MAX + 1];
 	unsigned int grace_ms;
+	uint32_t addr;
+	uint32_t gw;
 	char msg[160];
 };
 
@@ -97,6 +118,12 @@ enum connect_result core_connect(struct core *c, const char *profile,
 int core_disconnect(struct core *c, const char *ifname, uint64_t now,
                     struct actions *out);
 void core_shutdown(struct core *c, uint64_t now, struct actions *out);
+void core_lease(struct core *c, const char *ifname, uint32_t addr, uint32_t gw,
+                uint64_t now, struct actions *out);
+void core_sensor_exit(struct core *c, const char *ifname, int status,
+                      int conflict, uint64_t now, struct actions *out);
+void core_stop(struct core *c, const char *ifname, int level, uint64_t now,
+               struct actions *out);
 void core_reload(struct core *c, const struct config *cfg, uint64_t now,
                  struct actions *out);
 int core_done(const struct core *c);

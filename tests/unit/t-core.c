@@ -4,6 +4,8 @@
 #include "core.c"
 #include "test.h"
 
+#include <arpa/inet.h>
+
 #define EXITED(n) ((n) << 8)
 
 static struct config cfg;
@@ -430,6 +432,144 @@ static void test_reload(void) {
 	      "but not one stopped by an alert");
 }
 
+static const struct action *sensor_act(int sig) {
+	for (int i = 0; i < out.n; i++)
+		if (out.a[i].type == A_SIGNAL && out.a[i].kind == K_SENSOR &&
+		    out.a[i].sig == sig)
+			return &out.a[i];
+	return NULL;
+}
+
+static const struct action *dhcpc_sig(int sig) {
+	for (int i = 0; i < out.n; i++)
+		if (out.a[i].type == A_SIGNAL && out.a[i].kind == K_DHCPC &&
+		    out.a[i].sig == sig)
+			return &out.a[i];
+	return NULL;
+}
+
+static void test_sensor(void) {
+	uint32_t a200 = inet_addr("10.79.0.200"), a201 = inet_addr("10.79.0.201");
+	uint32_t a202 = inet_addr("10.79.0.202"), gw = inet_addr("10.79.0.1");
+	reset("");
+	add("10-a", "tnd0", AUTO);
+	core_link(&c, "tnd0", 1, 0, &out);
+
+	out.n = 0;
+	core_lease(&c, "tnd0", a200, gw, 100, &out);
+	CHECK(count(A_SPAWN_SENSOR) == 1 &&
+	          find_act(A_SPAWN_SENSOR)->addr == a200 &&
+	          find_act(A_SPAWN_SENSOR)->gw == gw,
+	      "a lease launches the sensor with its address and gateway");
+	out.n = 0;
+	core_lease(&c, "tnd0", a200, gw, 200, &out);
+	CHECK(out.n == 0, "the same lease changes nothing");
+	core_lease(&c, "tnd0", a201, gw, 300, &out);
+	CHECK(sensor_act(SIGTERM) && count(A_SPAWN_SENSOR) == 0,
+	      "a new address stops the sensor");
+	out.n = 0;
+	core_sensor_exit(&c, "tnd0", EXITED(0), 0, 400, &out);
+	CHECK(count(A_SPAWN_SENSOR) == 1 && find_act(A_SPAWN_SENSOR)->addr == a201,
+	      "and relaunches it on the new one");
+	out.n = 0;
+	core_lease(&c, "tnd0", 0, 0, 500, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(0), 0, 600, &out);
+	CHECK(sensor_act(SIGTERM) && count(A_SPAWN_SENSOR) == 0 &&
+	          tnd0()->sst == S_OFF,
+	      "losing the lease stops the sensor");
+
+	core_lease(&c, "tnd0", a202, gw, 700, &out);
+	out.n = 0;
+	core_sensor_exit(&c, "tnd0", EXITED(1), 1, 800, &out);
+	CHECK(dhcpc_sig(SIGUSR2) && count(A_SPAWN_SENSOR) == 0,
+	      "a conflict asks tundra-dhcpc for another address");
+	out.n = 0;
+	core_lease(&c, "tnd0", a202, gw, 900, &out);
+	CHECK(count(A_SPAWN_SENSOR) == 0,
+	      "the sensor does not come back on the conflicting address");
+	core_lease(&c, "tnd0", a200, gw, 1000, &out);
+	CHECK(count(A_SPAWN_SENSOR) == 1, "but does on the next one");
+
+	out.n = 0;
+	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 2000, &out);
+	CHECK(tnd0()->sst == S_BACKOFF &&
+	          logged("relaunching tundra-blueice-arp in 1000 ms"),
+	      "a failing sensor is relaunched with backoff");
+	CHECK(core_next_deadline(&c) == 3000, "the backoff is a deadline");
+	core_timer(&c, 3000, &out);
+	CHECK(count(A_SPAWN_SENSOR) == 1, "and relaunched when it expires");
+	core_sensor_exit(&c, "tnd0", SIGSEGV, 0, 3100, &out);
+	core_timer(&c, 5100, &out);
+	out.n = 0;
+	core_sensor_exit(&c, "tnd0", EXITED(2), 0, 5200, &out);
+	CHECK(logged("failed 3 times in a row") && dhcpc_sig(SIGUSR1) &&
+	          logged("stopped by an alert of level 5"),
+	      "the third failure in a row stops the connection");
+	core_child_exit(&c, "tnd0", EXITED(0), 5300, &out);
+	CHECK(st("tnd0") == C_BLOCKED && tnd0()->blocked == B_ALERT,
+	      "and leaves the interface stopped");
+
+	reset("");
+	add("10-a", "tnd0", AUTO);
+	core_link(&c, "tnd0", 1, 0, &out);
+	core_lease(&c, "tnd0", a200, gw, 0, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 100, &out);
+	core_timer(&c, 1100, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(1), 0, 1100 + STABLE_MS, &out);
+	CHECK(tnd0()->s_fails == 1 &&
+	          logged("relaunching tundra-blueice-arp in 1000 ms"),
+	      "a sensor that lasted 60 s starts counting again");
+}
+
+static void test_stop(void) {
+	uint32_t a200 = inet_addr("10.79.0.200"), gw = inet_addr("10.79.0.1");
+	reset("");
+	add("10-a", "tnd0", AUTO);
+	add("20-b", "tnd1", AUTO);
+	core_link(&c, "tnd0", 1, 0, &out);
+	core_link(&c, "tnd1", 1, 0, &out);
+	core_lease(&c, "tnd0", a200, gw, 0, &out);
+
+	out.n = 0;
+	core_stop(&c, "tnd0", 8, 100, &out);
+	CHECK(dhcpc_sig(SIGUSR1) && sensor_act(SIGTERM) && count(A_SIGNAL) == 2 &&
+	          st("tnd1") == C_RUNNING,
+	      "level 8 releases only that interface");
+	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
+	core_sensor_exit(&c, "tnd0", EXITED(111), 0, 200, &out);
+	CHECK(st("tnd0") == C_BLOCKED && tnd0()->blocked == B_ALERT &&
+	          count(A_SPAWN_SENSOR) == 0,
+	      "and leaves it stopped, without a sensor");
+	out.n = 0;
+	core_lease(&c, "tnd0", a200, gw, 300, &out);
+	CHECK(count(A_SPAWN_SENSOR) == 0, "a stale lease brings no sensor back");
+	CHECK(core_connect(&c, "10-a", "tnd0", 400, &out) == CONNECT_ALERT_PENDING,
+	      "the stopped profile cannot be connected again");
+
+	out.n = 0;
+	core_stop(&c, "tnd1", 9, 500, &out);
+	CHECK(dhcpc_sig(SIGUSR1) && c.lockdown &&
+	          logged("stopped by an alert of level 9 on tnd1"),
+	      "level 9 stops every interface");
+	core_child_exit(&c, "tnd1", EXITED(0), 600, &out);
+	core_link(&c, "tnd2", 1, 700, &out);
+	CHECK(st("tnd1") == C_BLOCKED && core_find(&c, "tnd2")->st == C_BLOCKED,
+	      "including the ones that appear later");
+
+	reset("");
+	add("10-a", "tnd0", AUTO);
+	core_link(&c, "tnd0", 1, 0, &out);
+	core_lease(&c, "tnd0", a200, gw, 0, &out);
+	out.n = 0;
+	core_shutdown(&c, 100, &out);
+	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
+	CHECK(sensor_act(SIGTERM) && !core_done(&c),
+	      "the shutdown waits for the sensor");
+	core_sensor_exit(&c, "tnd0", EXITED(0), 0, 300, &out);
+	CHECK(core_done(&c) && count(A_SPAWN_SENSOR) == 0,
+	      "and is done once it exits");
+}
+
 int main(void) {
 	test_autoconnect();
 	test_managed();
@@ -440,5 +580,7 @@ int main(void) {
 	test_shutdown();
 	test_stop_timeout();
 	test_reload();
+	test_sensor();
+	test_stop();
 	return test_summary();
 }

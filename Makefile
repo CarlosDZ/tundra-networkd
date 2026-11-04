@@ -55,7 +55,7 @@ TEST_TOOLS = $(patsubst tests/tools/%.c,$(TEST_BUILD)/tools/%,$(wildcard tests/t
 TEST_DEFS = -D_GNU_SOURCE -DTUNDRA_NETWORKD_VERSION=\"$(VERSION)-test\" \
             -DTUNDRA_IP_PATH=\"$(TUNDRA_IP_PATH)\" \
             -DTUNDRA_DHCPC_PATH=\"$(CURDIR)/$(TEST_BUILD)/tools/dhcpc-fake\" \
-            -DTUNDRA_BLUEICE_ARP_PATH=\"$(TUNDRA_BLUEICE_ARP_PATH)\" \
+            -DTUNDRA_BLUEICE_ARP_PATH=\"$(CURDIR)/$(TEST_BUILD)/tools/biarp-fake\" \
             -DTUNDRA_NETWORKD_CONF_DIR=\"$(CURDIR)/$(TEST_BUILD)/conf\" \
             -DTUNDRA_NETWORKD_RUN_DIR=\"$(CURDIR)/$(TEST_BUILD)/run\" \
             -DTUNDRA_NETWORKD_SOCKET=\"/run/tundra-test/network.socket\" \

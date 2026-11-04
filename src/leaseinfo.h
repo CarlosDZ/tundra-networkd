@@ -11,6 +11,7 @@
 struct lease_info {
 	uint32_t address;
 	int prefix;
+	uint32_t router;
 	uint32_t dns[DNS_MAX];
 	int ndns;
 };

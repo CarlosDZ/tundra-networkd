@@ -1,4 +1,5 @@
 #include "loop.h"
+#include "alert.h"
 #include "core.h"
 #include "files.h"
 #include "lease.h"
@@ -9,6 +10,7 @@
 #include "server.h"
 #include "spawn.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -41,6 +43,8 @@ struct child {
 	pid_t pid;
 	int fd;
 	int reaped;
+	enum child_kind kind;
+	int conflict;
 	char ifname[IF_NAMESIZE];
 	char profile[PROFILE_NAME_MAX + 1];
 	char line[OUT_LINE_MAX];
@@ -84,16 +88,46 @@ static int watch_fd(struct daemon *d, int fd, uint64_t tag) {
 	return 0;
 }
 
-static void emit_line(struct child *k) {
+static void execute(struct daemon *d, struct actions *acts);
+
+static void handle_alert(struct daemon *d, struct child *k) {
+	const char *from =
+	    k->kind == K_SENSOR ? "tundra-blueice-arp" : "tundra-dhcpc";
+	struct actions acts = {0};
+	struct alert a;
+	if (alert_parse(k->line, &a) < 0) {
+		printf("networkd: %s: malformed alert from %s discarded\n", k->ifname,
+		       from);
+		return;
+	}
+	if (!alert_allowed(k->kind == K_SENSOR ? SRC_SENSOR : SRC_DHCPC, a.by)) {
+		printf("networkd: %s: alert by %s discarded on the pipe of %s\n",
+		       k->ifname, a.by, from);
+		return;
+	}
+	if (a.action == AL_STOP) {
+		core_stop(&d->core, k->ifname, a.level, now_ms(), &acts);
+		execute(d, &acts);
+	}
+}
+
+static void emit_line(struct daemon *d, struct child *k) {
 	k->line[k->len] = '\0';
-	printf("dhcpc[%s/%s]: %s\n", k->ifname, k->profile, k->line);
 	k->len = 0;
+	if (k->kind == K_SENSOR)
+		printf("blueice-arp[%s]: %s\n", k->ifname, k->line);
+	else
+		printf("dhcpc[%s/%s]: %s\n", k->ifname, k->profile, k->line);
+	if (strncmp(k->line, "alert ", 6) == 0)
+		handle_alert(d, k);
+	else if (k->kind == K_SENSOR && strncmp(k->line, "conflict addr ", 14) == 0)
+		k->conflict = 1;
 }
 
 static void release_child(struct daemon *d, struct child *k) {
 	if (k->fd >= 0) {
 		if (k->len)
-			emit_line(k);
+			emit_line(d, k);
 		epoll_ctl(d->ep, EPOLL_CTL_DEL, k->fd, NULL);
 		close(k->fd);
 		k->fd = -1;
@@ -116,7 +150,7 @@ static void drain(struct daemon *d, struct child *k) {
 		}
 		for (ssize_t i = 0; i < n; i++) {
 			if (buf[i] == '\n' || k->len == OUT_LINE_MAX - 1) {
-				emit_line(k);
+				emit_line(d, k);
 				if (buf[i] == '\n')
 					continue;
 			}
@@ -125,16 +159,71 @@ static void drain(struct daemon *d, struct child *k) {
 	}
 }
 
-static struct child *running_child(struct daemon *d, const char *ifname) {
+static struct child *running_child(struct daemon *d, const char *ifname,
+                                   enum child_kind kind) {
 	for (int i = 0; i < CHILDREN_MAX; i++) {
 		struct child *k = &d->kids[i];
-		if (k->used && !k->reaped && strcmp(k->ifname, ifname) == 0)
+		if (k->used && !k->reaped && k->kind == kind &&
+		    strcmp(k->ifname, ifname) == 0)
 			return k;
 	}
 	return NULL;
 }
 
-static void execute(struct daemon *d, struct actions *acts);
+static struct child *new_child(struct daemon *d, const char *path,
+                               char *const argv[], enum child_kind kind,
+                               const char *ifname, const char *profile) {
+	struct child *k = NULL;
+	for (int i = 0; i < CHILDREN_MAX && !k; i++)
+		if (!d->kids[i].used)
+			k = &d->kids[i];
+	int fd = -1;
+	pid_t pid = k ? spawn_child(path, argv, &fd) : -1;
+	if (pid < 0)
+		return NULL;
+	memset(k, 0, sizeof(*k));
+	k->used = 1;
+	k->pid = pid;
+	k->fd = fd;
+	k->kind = kind;
+	snprintf(k->ifname, sizeof(k->ifname), "%s", ifname);
+	snprintf(k->profile, sizeof(k->profile), "%s", profile);
+	watch_fd(d, fd, ((uint64_t)T_CHILD << 32) | (uint64_t)(k - d->kids));
+	return k;
+}
+
+static void spawn_sensor(struct daemon *d, const struct action *a) {
+	char addr[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
+	char *argv[12];
+	int n = 0;
+	inet_ntop(AF_INET, &a->addr, addr, sizeof(addr));
+	inet_ntop(AF_INET, &a->gw, gw, sizeof(gw));
+	argv[n++] = "tundra-blueice-arp";
+	argv[n++] = "watch";
+	argv[n++] = (char *)a->iface;
+	argv[n++] = "addr";
+	argv[n++] = addr;
+	if (a->gw) {
+		argv[n++] = "gw";
+		argv[n++] = gw;
+	}
+	argv[n++] = "defend";
+	argv[n++] = "once";
+	argv[n] = NULL;
+
+	struct child *k =
+	    new_child(d, TUNDRA_BLUEICE_ARP_PATH, argv, K_SENSOR, a->iface, "");
+	if (!k) {
+		struct actions acts = {0};
+		fprintf(stderr, "networkd: %s: cannot launch tundra-blueice-arp\n",
+		        a->iface);
+		core_sensor_exit(&d->core, a->iface, 1 << 8, 0, now_ms(), &acts);
+		execute(d, &acts);
+		return;
+	}
+	printf("networkd: %s: tundra-blueice-arp watching %s (pid %d)\n", a->iface,
+	       addr, (int)k->pid);
+}
 
 static void spawn_dhcpc(struct daemon *d, const struct action *a) {
 	char metric[16], grace[16];
@@ -160,14 +249,9 @@ static void spawn_dhcpc(struct daemon *d, const struct action *a) {
 	argv[n++] = (char *)a->profile;
 	argv[n] = NULL;
 
-	struct child *k = NULL;
-	for (int i = 0; i < CHILDREN_MAX && !k; i++)
-		if (!d->kids[i].used)
-			k = &d->kids[i];
-
-	int fd = -1;
-	pid_t pid = k ? spawn_child(TUNDRA_DHCPC_PATH, argv, &fd) : -1;
-	if (pid < 0) {
+	struct child *k =
+	    new_child(d, TUNDRA_DHCPC_PATH, argv, K_DHCPC, a->iface, a->profile);
+	if (!k) {
 		struct actions acts = {0};
 		fprintf(stderr, "networkd: %s: cannot launch tundra-dhcpc\n", a->iface);
 		core_child_exit(&d->core, a->iface, 1 << 8, now_ms(), &acts);
@@ -175,15 +259,8 @@ static void spawn_dhcpc(struct daemon *d, const struct action *a) {
 		return;
 	}
 
-	memset(k, 0, sizeof(*k));
-	k->used = 1;
-	k->pid = pid;
-	k->fd = fd;
-	snprintf(k->ifname, sizeof(k->ifname), "%s", a->iface);
-	snprintf(k->profile, sizeof(k->profile), "%s", a->profile);
-	watch_fd(d, fd, ((uint64_t)T_CHILD << 32) | (uint64_t)(k - d->kids));
 	printf("networkd: %s: tundra-dhcpc started for profile %s (pid %d)\n",
-	       a->iface, a->profile, (int)pid);
+	       a->iface, a->profile, (int)k->pid);
 }
 
 static void execute(struct daemon *d, struct actions *acts) {
@@ -195,8 +272,11 @@ static void execute(struct daemon *d, struct actions *acts) {
 			spawn_dhcpc(d, a);
 			d->dirty = 1;
 			break;
+		case A_SPAWN_SENSOR:
+			spawn_sensor(d, a);
+			break;
 		case A_SIGNAL:
-			if ((k = running_child(d, a->iface)))
+			if ((k = running_child(d, a->iface, a->kind)))
 				kill(k->pid, a->sig);
 			d->dirty = 1;
 			break;
@@ -269,10 +349,16 @@ static void reap(struct daemon *d) {
 			d->dirty = 1;
 			struct actions acts = {0};
 			char ifname[IF_NAMESIZE];
+			enum child_kind kind = k->kind;
+			int conflict = k->conflict;
 			snprintf(ifname, sizeof(ifname), "%s", k->ifname);
 			if (k->fd < 0)
 				k->used = 0;
-			core_child_exit(&d->core, ifname, status, now_ms(), &acts);
+			if (kind == K_SENSOR)
+				core_sensor_exit(&d->core, ifname, status, conflict, now_ms(),
+				                 &acts);
+			else
+				core_child_exit(&d->core, ifname, status, now_ms(), &acts);
 			execute(d, &acts);
 			break;
 		}
@@ -380,6 +466,10 @@ static void refresh(struct daemon *d) {
 		if (!same && now.connected)
 			emit(d, 1, ci->name, &now);
 		*v = now;
+		struct actions acts = {0};
+		core_lease(&d->core, ci->name, now.connected ? li.address : 0,
+		           now.connected ? li.router : 0, now_ms(), &acts);
+		execute(d, &acts);
 	}
 	write_dns(d, src, n);
 }

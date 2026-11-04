@@ -57,6 +57,9 @@ int leaseinfo_parse(const char *text, size_t len, struct lease_info *out) {
 				has_addr = parse_ip(v, vlen, &out->address) == 0;
 			else if (klen == 4 && strncmp(line, "mask", 4) == 0)
 				has_mask = parse_ip(v, vlen, &mask) == 0;
+			else if (klen == 6 && strncmp(line, "router", 6) == 0 &&
+			         parse_ip(v, vlen, &out->router) < 0)
+				out->router = 0;
 			else if (klen == 3 && strncmp(line, "dns", 3) == 0)
 				parse_dns(v, stop, out);
 		}

@@ -60,6 +60,7 @@ static struct core_iface *find_or_add(struct core *c, const char *ifname) {
 	memcpy(added->name, ifname, len);
 	added->name[len] = '\0';
 	added->backoff_ms = BACKOFF_MIN_MS;
+	added->s_backoff_ms = BACKOFF_MIN_MS;
 	return added;
 }
 
@@ -93,6 +94,48 @@ static void begin_stop(struct core_iface *ci, int sig, uint64_t now,
 	ci->st = C_STOPPING;
 	ci->stop_at = now + STOP_TIMEOUT_MS;
 	signal_child(out, ci, sig);
+}
+
+static void sensor_signal(struct actions *out, const struct core_iface *ci,
+                          int sig) {
+	struct action *a = push(out, A_SIGNAL, ci);
+	if (a) {
+		a->kind = K_SENSOR;
+		a->sig = sig;
+	}
+}
+
+static void sensor_stop(struct core_iface *ci, uint64_t now,
+                        struct actions *out) {
+	if (ci->sst == S_RUNNING) {
+		ci->sst = S_STOPPING;
+		ci->s_stop_at = now + STOP_TIMEOUT_MS;
+		sensor_signal(out, ci, SIGTERM);
+	} else if (ci->sst == S_BACKOFF) {
+		ci->sst = S_OFF;
+	}
+}
+
+static void sensor_sync(struct core_iface *ci, uint64_t now,
+                        struct actions *out) {
+	int want = ci->st == C_RUNNING && ci->want_addr;
+	if (ci->sst == S_OFF && want) {
+		struct action *a = push(out, A_SPAWN_SENSOR, ci);
+		if (!a)
+			return;
+		a->kind = K_SENSOR;
+		a->addr = ci->want_addr;
+		a->gw = ci->want_gw;
+		ci->sst = S_RUNNING;
+		ci->s_addr = ci->want_addr;
+		ci->s_gw = ci->want_gw;
+		ci->s_started_at = now;
+	} else if (ci->sst == S_RUNNING && (!want || ci->s_addr != ci->want_addr ||
+	                                    ci->s_gw != ci->want_gw)) {
+		sensor_stop(ci, now, out);
+	} else if (ci->sst == S_BACKOFF && !want) {
+		ci->sst = S_OFF;
+	}
 }
 
 static void spawn_with(struct core_iface *ci, const struct profile *p,
@@ -201,6 +244,10 @@ void core_link(struct core *c, const char *ifname, int physical, uint64_t now,
 		else
 			log_msg(out, ci, "not managed: %s", conf->error);
 	}
+	if (c->lockdown && ci->st == C_IDLE) {
+		ci->st = C_BLOCKED;
+		ci->blocked = B_ALERT;
+	}
 	if (ci->st == C_WAIT_LINK)
 		resume(c, ci, now, out);
 	else
@@ -244,6 +291,12 @@ void core_child_exit(struct core *c, const char *ifname, int status,
 	if (!ci || (ci->st != C_RUNNING && ci->st != C_STOPPING))
 		return;
 
+	if (ci->st == C_STOPPING && ci->alert_stop) {
+		ci->alert_stop = 0;
+		ci->st = C_BLOCKED;
+		ci->blocked = B_ALERT;
+		return;
+	}
 	if (ci->st == C_STOPPING) {
 		ci->st = C_IDLE;
 		ci->kept[0] = '\0';
@@ -302,6 +355,16 @@ void core_timer(struct core *c, uint64_t now, struct actions *out) {
 			ci->stop_at = 0;
 			signal_child(out, ci, SIGKILL);
 			log_msg(out, ci, "tundra-dhcpc did not stop in %u s, killed",
+			        STOP_TIMEOUT_MS / 1000);
+		}
+		if (ci->sst == S_BACKOFF && now >= ci->s_retry_at) {
+			ci->sst = S_OFF;
+			sensor_sync(ci, now, out);
+		}
+		if (ci->sst == S_STOPPING && ci->s_stop_at && now >= ci->s_stop_at) {
+			ci->s_stop_at = 0;
+			sensor_signal(out, ci, SIGKILL);
+			log_msg(out, ci, "tundra-blueice-arp did not stop in %u s, killed",
 			        STOP_TIMEOUT_MS / 1000);
 		}
 	}
@@ -385,6 +448,7 @@ void core_shutdown(struct core *c, uint64_t now, struct actions *out) {
 		} else if (ci->st == C_BACKOFF || ci->st == C_WAIT_LINK) {
 			ci->st = C_IDLE;
 		}
+		sensor_stop(ci, now, out);
 	}
 }
 
@@ -392,19 +456,30 @@ int core_done(const struct core *c) {
 	if (!c->shutting_down)
 		return 0;
 	for (int i = 0; i < c->n; i++)
-		if (c->ifs[i].st == C_RUNNING || c->ifs[i].st == C_STOPPING)
+		if (c->ifs[i].st == C_RUNNING || c->ifs[i].st == C_STOPPING ||
+		    c->ifs[i].sst == S_RUNNING || c->ifs[i].sst == S_STOPPING)
 			return 0;
 	return 1;
 }
 
+static void earliest(uint64_t *next, uint64_t t) {
+	if (t && t < *next)
+		*next = t;
+}
+
 uint64_t core_next_deadline(const struct core *c) {
 	uint64_t next = UINT64_MAX;
-	for (int i = 0; i < c->n; i++)
-		if (c->ifs[i].st == C_BACKOFF && c->ifs[i].retry_at < next)
-			next = c->ifs[i].retry_at;
-		else if (c->ifs[i].st == C_STOPPING && c->ifs[i].stop_at &&
-		         c->ifs[i].stop_at < next)
-			next = c->ifs[i].stop_at;
+	for (int i = 0; i < c->n; i++) {
+		const struct core_iface *ci = &c->ifs[i];
+		if (ci->st == C_BACKOFF)
+			earliest(&next, ci->retry_at);
+		else if (ci->st == C_STOPPING)
+			earliest(&next, ci->stop_at);
+		if (ci->sst == S_BACKOFF)
+			earliest(&next, ci->s_retry_at);
+		else if (ci->sst == S_STOPPING)
+			earliest(&next, ci->s_stop_at);
+	}
 	return next;
 }
 
@@ -506,4 +581,102 @@ void core_reload(struct core *c, const struct config *cfg, uint64_t now,
 		reload_iface(c, &c->ifs[i], now, out);
 	for (int i = 0; i < c->n; i++)
 		try_autoconnect(c, &c->ifs[i], now, out);
+}
+
+void core_lease(struct core *c, const char *ifname, uint32_t addr, uint32_t gw,
+                uint64_t now, struct actions *out) {
+	struct core_iface *ci = find(c, ifname);
+	if (!ci)
+		return;
+	if (!addr)
+		ci->conflict_addr = 0;
+	else if (addr == ci->conflict_addr)
+		addr = 0;
+	ci->want_addr = addr;
+	ci->want_gw = addr ? gw : 0;
+	if (!c->shutting_down)
+		sensor_sync(ci, now, out);
+}
+
+static void stop_one(struct core_iface *ci, uint64_t now, struct actions *out) {
+	ci->pending[0] = '\0';
+	if (ci->st == C_RUNNING) {
+		ci->alert_stop = 1;
+		begin_stop(ci, SIGUSR1, now, out);
+	} else if (ci->st == C_STOPPING) {
+		ci->alert_stop = 1;
+	} else {
+		ci->st = C_BLOCKED;
+		ci->blocked = B_ALERT;
+	}
+	ci->want_addr = 0;
+	sensor_stop(ci, now, out);
+}
+
+void core_stop(struct core *c, const char *ifname, int level, uint64_t now,
+               struct actions *out) {
+	if (level >= ALERT_ALL_LEVEL) {
+		c->lockdown = 1;
+		for (int i = 0; i < c->n; i++) {
+			stop_one(&c->ifs[i], now, out);
+			log_msg(out, &c->ifs[i], "stopped by an alert of level %d on %s",
+			        level, ifname);
+		}
+		return;
+	}
+	struct core_iface *ci = find(c, ifname);
+	if (!ci)
+		return;
+	stop_one(ci, now, out);
+	log_msg(out, ci, "stopped by an alert of level %d", level);
+}
+
+void core_sensor_exit(struct core *c, const char *ifname, int status,
+                      int conflict, uint64_t now, struct actions *out) {
+	struct core_iface *ci = find(c, ifname);
+	if (!ci || (ci->sst != S_RUNNING && ci->sst != S_STOPPING))
+		return;
+	if (ci->sst == S_STOPPING) {
+		ci->sst = S_OFF;
+		ci->s_stop_at = 0;
+		if (!c->shutting_down)
+			sensor_sync(ci, now, out);
+		return;
+	}
+	ci->sst = S_OFF;
+	int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+	if (code == 1 && conflict) {
+		ci->conflict_addr = ci->s_addr;
+		ci->want_addr = 0;
+		log_msg(out, ci, "address conflict, asking tundra-dhcpc for another");
+		if (ci->st == C_RUNNING)
+			signal_child(out, ci, SIGUSR2);
+		return;
+	}
+	if (code == 111)
+		return;
+
+	if (now - ci->s_started_at >= STABLE_MS) {
+		ci->s_fails = 0;
+		ci->s_backoff_ms = BACKOFF_MIN_MS;
+	}
+	ci->s_fails++;
+	if (code < 0)
+		log_msg(out, ci, "tundra-blueice-arp killed by signal %d",
+		        WTERMSIG(status));
+	else
+		log_msg(out, ci, "tundra-blueice-arp exited with %d", code);
+	if (ci->s_fails >= SENSOR_FAILS_MAX) {
+		log_msg(out, ci, "tundra-blueice-arp failed %d times in a row",
+		        ci->s_fails);
+		core_stop(c, ci->name, SENSOR_DOWN_LEVEL, now, out);
+		return;
+	}
+	ci->sst = S_BACKOFF;
+	ci->s_retry_at = now + ci->s_backoff_ms;
+	log_msg(out, ci, "relaunching tundra-blueice-arp in %u ms",
+	        ci->s_backoff_ms);
+	ci->s_backoff_ms *= 2;
+	if (ci->s_backoff_ms > BACKOFF_MAX_MS)
+		ci->s_backoff_ms = BACKOFF_MAX_MS;
 }
