@@ -113,12 +113,33 @@ static void wpa_resync(const struct core_iface *ci, struct actions *out) {
 		push(out, A_WPA_SYNC, ci);
 }
 
-static int matches(const struct profile *p, const struct core_iface *ci) {
+static int fallback_matches(const struct profile *p,
+                            const struct core_iface *ci) {
 	if (!p->valid || p->has_ssid)
 		return 0;
 	if (p->any_interface)
 		return ci->physical;
 	return strcmp(p->interface, ci->name) == 0;
+}
+
+/* A profile without ssid connects a cable by itself, but on WiFi it only
+ * applies once associated to a network without a profile. */
+static int matches(const struct profile *p, const struct core_iface *ci) {
+	return !ci->wireless && fallback_matches(p, ci);
+}
+
+static int same_ssid(const struct profile *p, const unsigned char *ssid,
+                     size_t len) {
+	return p->ssid_len == len && memcmp(p->ssid, ssid, len) == 0;
+}
+
+/* Whether p can carry the connection the interface has now. */
+static int fits(const struct profile *p, const struct core_iface *ci) {
+	if (!ci->wireless)
+		return matches(p, ci);
+	if (p->has_ssid)
+		return wifi_matches(p, ci) && same_ssid(p, ci->cssid, ci->cssid_len);
+	return fallback_matches(p, ci);
 }
 
 static void stop_child(struct core_iface *ci, enum child_kind kind, int sig,
@@ -325,8 +346,10 @@ static void spawn_with(struct core_iface *ci, const struct profile *p,
 		a->metric = conf->metric;
 		a->has_table = conf->has_table;
 		snprintf(a->table, sizeof(a->table), "%s", conf->table);
-		a->grace_ms = conf->grace_ms;
 	}
+	a->grace_ms = conf && conf->has_grace ? conf->grace_ms
+	              : ci->wireless          ? WIFI_GRACE_MS
+	                                      : 0;
 	ci->st = C_RUNNING;
 	ci->started_at = now;
 }
@@ -374,7 +397,7 @@ static void resume(struct core *c, struct core_iface *ci, uint64_t now,
 		           now, out);
 		return;
 	}
-	if (p && matches(p, ci) && managed(c, ci, &conf) && !c->shutting_down)
+	if (p && fits(p, ci) && managed(c, ci, &conf) && !c->shutting_down)
 		spawn(c, ci, p, now, out);
 	else
 		try_autoconnect(c, ci, now, out);
@@ -397,7 +420,7 @@ static void after_stop(struct core *c, struct core_iface *ci, uint64_t now,
 	const struct profile *p =
 	    ci->pending[0] ? profile_by_name(c, ci->pending) : NULL;
 	ci->pending[0] = '\0';
-	if (p && matches(p, ci) && managed(c, ci, &conf) && !wifi_off(c, ci))
+	if (p && fits(p, ci) && managed(c, ci, &conf) && !wifi_off(c, ci))
 		spawn(c, ci, p, now, out);
 	else
 		try_autoconnect(c, ci, now, out);
@@ -478,6 +501,7 @@ void core_link_gone(struct core *c, const char *ifname, uint64_t now,
 	if (!ci)
 		return;
 	ci->present = 0;
+	ci->associated = 0;
 	wpa_sync(c, ci, now, out);
 	if (ci->st == C_STATIC) {
 		ci->st = C_WAIT_LINK;
@@ -828,7 +852,7 @@ static void reload_iface(struct core *c, struct core_iface *ci, uint64_t now,
 	end_conn(ci);
 	if (!has_child(ci))
 		return;
-	if (matches(p, ci)) {
+	if (fits(p, ci)) {
 		log_msg(out, ci, "profile %s changed, reconnecting", p->name);
 		snprintf(ci->pending, sizeof(ci->pending), "%s", p->name);
 	} else {
@@ -967,7 +991,7 @@ int core_force(struct core *c, unsigned int id, const char *origin,
 		const struct profile *p =
 		    ci->profile[0] ? profile_by_name(c, ci->profile) : NULL;
 		const struct iface_conf *conf;
-		if (!p || !matches(p, ci) || !managed(c, ci, &conf) || wifi_off(c, ci))
+		if (!p || !fits(p, ci) || !managed(c, ci, &conf) || wifi_off(c, ci))
 			try_autoconnect(c, ci, now, out);
 		else if (!ci->present)
 			ci->st = C_WAIT_LINK;
@@ -1161,6 +1185,7 @@ void core_wpa_exit(struct core *c, const char *ifname, int status, uint64_t now,
 		wpa_sync(c, ci, now, out);
 		return;
 	}
+	core_wifi_lost(c, ifname);
 	if (WIFSIGNALED(status))
 		log_msg(out, ci, "wpa_supplicant killed by signal %d",
 		        WTERMSIG(status));
@@ -1200,4 +1225,67 @@ int core_wifi_nets(const struct core *c, const char *ifname,
 		n++;
 	}
 	return n;
+}
+
+void core_wifi_lost(struct core *c, const char *ifname) {
+	struct core_iface *ci = find(c, ifname);
+	if (!ci)
+		return;
+	ci->associated = 0;
+	ci->assid_len = 0;
+	ci->bssid[0] = '\0';
+}
+
+static const struct profile *
+assoc_profile(const struct core *c, const struct core_iface *ci,
+              const char *id_str, const unsigned char *ssid, size_t len) {
+	const struct profile *p = id_str[0] ? profile_by_name(c, id_str) : NULL;
+	if (p && wifi_matches(p, ci) && same_ssid(p, ssid, len))
+		return p;
+	for (int i = 0; i < c->cfg->n; i++)
+		if (fallback_matches(&c->cfg->profiles[i], ci))
+			return &c->cfg->profiles[i];
+	return NULL;
+}
+
+void core_wifi_assoc(struct core *c, const char *ifname, const char *id_str,
+                     const unsigned char *ssid, size_t ssid_len,
+                     const char *bssid, uint64_t now, struct actions *out) {
+	struct core_iface *ci = find(c, ifname);
+	if (!ci || !ci->wireless || ssid_len > SSID_MAX)
+		return;
+	ci->associated = 1;
+	memcpy(ci->assid, ssid, ssid_len);
+	ci->assid_len = ssid_len;
+	snprintf(ci->bssid, sizeof(ci->bssid), "%s", bssid);
+	if (c->shutting_down)
+		return;
+	const struct profile *p = assoc_profile(c, ci, id_str, ssid, ssid_len);
+	if (!p) {
+		log_msg(out, ci, "associated, but no profile fits that network");
+		return;
+	}
+	int same = ci->st != C_IDLE && strcmp(ci->profile, p->name) == 0 &&
+	           ci->cssid_len == ssid_len &&
+	           memcmp(ci->cssid, ssid, ssid_len) == 0;
+	if (same || (ci->st == C_BLOCKED && ci->blocked == B_ALERT))
+		return;
+	memcpy(ci->cssid, ssid, ssid_len);
+	ci->cssid_len = ssid_len;
+	if (has_child(ci) || ci->st == C_STOPPING) {
+		log_msg(out, ci,
+		        "associated to another network, reconnecting with profile %s",
+		        p->name);
+		snprintf(ci->pending, sizeof(ci->pending), "%s", p->name);
+		if (has_child(ci)) {
+			end_conn(ci);
+			release(c, ci, now, out);
+		}
+		return;
+	}
+	end_conn(ci);
+	ci->st = C_IDLE;
+	ci->blocked = B_NONE;
+	ci->backoff_ms = BACKOFF_MIN_MS;
+	spawn(c, ci, p, now, out);
 }

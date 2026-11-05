@@ -89,6 +89,13 @@ three servers at most.
   `CONNECT` to a WiFi profile leaves only that network enabled; `DISCONNECT`
   disconnects `wpa_supplicant` until the next `CONNECT`. A reload replaces only
   the networks whose profile changed.
+- **DHCP on WiFi**: `tundra-dhcpc` starts on association, with the profile of
+  that network, or with the first profile without `ssid` that fits the
+  interface for a network without profile (one added by hand with `wpa_cli`).
+  `carrier-grace` is 3000 ms unless `interfaces` says otherwise. Another SSID
+  releases it with `SIGUSR1` and starts another one; roaming within the same
+  SSID touches nothing. A profile without `ssid` never starts on WiFi by
+  itself.
 
 | tundra-dhcpc exits with | tundra-networkd |
 |-------------------------|-----------------|
@@ -143,11 +150,17 @@ group does not exist). One command per line; each one answers `OK` or
 | `ALERT-REPLY <id> <option>` | One of the options the alert offers in `reply` |
 
 ```
-iface enp8s0 state connected profile casa address 10.79.0.100/24 trusted no override - alert -
-profile casa interface enp8s0 autoconnect yes trusted no
+iface enp8s0 state connected profile casa address 10.79.0.100/24 trusted no override - alert - ssid - bssid -
+iface wlp3s0 state connected profile cafe address 10.80.0.119/24 trusted no override - alert - ssid caf%C3%A9 bssid 52:54:00:12:34:56
+profile casa interface enp8s0 autoconnect yes trusted no ssid - security -
+profile cafe interface wlp3s0 autoconnect no trusted no ssid caf%C3%A9 security wpa3
 event connected enp8s0 casa address 10.79.0.100/24
 ALERT 7 casa alert 111/8 stop by tundra-blueice-arp on enp8s0 ts 1762171512.347 reply force,disconnect info case D ...
 ```
+
+`ssid` and `bssid` close every `iface` line, `ssid` and `security` every
+`profile` line, with `-` on a cable; the ssid uses the `%XX` encoding of the
+alerts (ADR-025) and the passphrase never leaves the daemon.
 
 States: `idle`, `connecting`, `connected`, `stopping`, `retrying`, `waiting`,
 `unmanaged`, `off` and `blocked`, with `reason config`, `exited`, `alert` or
@@ -210,7 +223,7 @@ make check
 
 ## Currently unsupported
 
-- WiFi: an association does not launch `tundra-dhcpc` yet.
+- WiFi Enterprise (EAP) profiles.
 - IPv6.
 - Sandboxing directives in the unit and dropping privileges.
 - An event when another client answers an alert.

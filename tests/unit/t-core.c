@@ -1015,8 +1015,13 @@ static void test_wifi_off(void) {
 	core_init(&c, &k[0]);
 	out.n = 0;
 	core_link(&c, "wl0", WL_UP, 0, &out);
-	CHECK(count(A_SPAWN_WPA) == 1 && count(A_SPAWN_DHCPC) == 1,
-	      "a profile without ssid connects on a wireless interface");
+	CHECK(count(A_SPAWN_WPA) == 1 && count(A_SPAWN_DHCPC) == 0,
+	      "on WiFi a profile without ssid waits for an association");
+	core_wifi_assoc(&c, "wl0", "", (const unsigned char *)"red", 3,
+	                "02:00:00:00:00:00", 5, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 1 &&
+	          strcmp(find_act(A_SPAWN_DHCPC)->profile, "10-a") == 0,
+	      "and applies to a network without a profile");
 	reload("wl0 {\n wifi = no\n}\n", "wl0", AUTO, 1000);
 	CHECK(logged("wifi is off, disconnecting") && count(A_SIGNAL) == 2 &&
 	          wpa_signal() && wpa_signal()->sig == SIGTERM &&
@@ -1033,9 +1038,9 @@ static void test_wifi_off(void) {
 	CHECK(count(A_SPAWN_WPA) == 0 && count(A_SPAWN_DHCPC) == 0,
 	      "an invalid block does not turn it back on");
 	reload("", "wl0", AUTO, 3000);
-	CHECK(count(A_SPAWN_WPA) == 1 && count(A_SPAWN_DHCPC) == 1 &&
+	CHECK(count(A_SPAWN_WPA) == 1 && count(A_SPAWN_DHCPC) == 0 &&
 	          !core_wifi_off(&c, "wl0"),
-	      "a reload to wifi = yes launches both again");
+	      "a reload to wifi = yes launches wpa_supplicant again");
 	reload("wl0 {\n metric = x\n}\n", "wl0", AUTO, 4000);
 	CHECK(!wpa_signal() && wst("wl0") == W_RUNNING,
 	      "an invalid block keeps wpa_supplicant running");
@@ -1133,6 +1138,77 @@ static void test_wifi_nets(void) {
 	      "without wpa_supplicant the selection waits for the next one");
 }
 
+static void assoc(const char *id_str, const char *ssid, const char *bssid,
+                  uint64_t now) {
+	out.n = 0;
+	core_wifi_assoc(&c, "wl0", id_str, (const unsigned char *)ssid,
+	                strlen(ssid), bssid, now, &out);
+}
+
+static void test_wifi_assoc(void) {
+	reset("");
+	addw_to(&cfg, "10-casa", "wl0", "wpa3", 1);
+	addw_to(&cfg, "20-cafe", "wl0", "open", 0);
+	add("90-any", "*", AUTO);
+	core_link(&c, "wl0", WL_UP, 0, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 0, "no dhcpc on WiFi before an association");
+	assoc("10-casa", "10-casa", "02:00:00:00:01:00", 10);
+	const struct action *a = find_act(A_SPAWN_DHCPC);
+	CHECK(a && strcmp(a->profile, "10-casa") == 0 && a->grace_ms == 3000,
+	      "an association launches dhcpc with that profile and "
+	      "carrier-grace 3000");
+	const struct core_iface *w = core_find(&c, "wl0");
+	CHECK(w->associated && w->assid_len == 7 &&
+	          strcmp(w->bssid, "02:00:00:00:01:00") == 0,
+	      "the association is kept for STATUS");
+
+	assoc("10-casa", "10-casa", "02:00:00:00:02:00", 20);
+	CHECK(out.n == 0 && strcmp(w->bssid, "02:00:00:00:02:00") == 0,
+	      "roaming in the same SSID touches nothing but the bssid");
+	core_wifi_lost(&c, "wl0");
+	CHECK(!w->associated && st("wl0") == C_RUNNING,
+	      "losing the association leaves dhcpc to its carrier-grace");
+	assoc("10-casa", "10-casa", "02:00:00:00:01:00", 30);
+	CHECK(out.n == 0, "and coming back to it does nothing");
+
+	assoc("20-cafe", "20-cafe", "02:00:00:00:03:00", 40);
+	CHECK(count(A_SIGNAL) == 1 && find_act(A_SIGNAL)->sig == SIGUSR1 &&
+	          strcmp(w->pending, "20-cafe") == 0 &&
+	          logged("associated to another network"),
+	      "another SSID releases the old dhcpc with SIGUSR1");
+	out.n = 0;
+	core_child_exit(&c, "wl0", EXITED(0), 50, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 1 &&
+	          strcmp(find_act(A_SPAWN_DHCPC)->profile, "20-cafe") == 0,
+	      "and launches another one with the new lease-key");
+
+	assoc("", "hotel", "02:00:00:00:04:00", 60);
+	out.n = 0;
+	core_child_exit(&c, "wl0", EXITED(0), 70, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 1 &&
+	          strcmp(find_act(A_SPAWN_DHCPC)->profile, "90-any") == 0,
+	      "a network without profile takes the first profile without ssid");
+	assoc("10-casa", "otra", "02:00:00:00:05:00", 80);
+	CHECK(count(A_SIGNAL) == 1 && strcmp(w->pending, "90-any") == 0,
+	      "an id_str whose ssid does not match counts as a network without "
+	      "profile, and a new SSID is a new connection");
+
+	reset("wl0 {\n carrier-grace = 500\n}\n");
+	addw_to(&cfg, "10-casa", "wl0", "wpa3", 1);
+	core_link(&c, "wl0", WL, 0, &out);
+	assoc("10-casa", "10-casa", "02:00:00:00:01:00", 10);
+	CHECK(find_act(A_SPAWN_DHCPC) && find_act(A_SPAWN_DHCPC)->grace_ms == 500,
+	      "carrier-grace in interfaces wins over the WiFi default");
+	assoc("", "hotel", "02:00:00:00:04:00", 20);
+	CHECK(logged("no profile fits that network") && count(A_SIGNAL) == 0,
+	      "without a profile that fits, the old connection stays");
+
+	out.n = 0;
+	core_wpa_exit(&c, "wl0", 9, 30, &out);
+	CHECK(!core_find(&c, "wl0")->associated,
+	      "a dead wpa_supplicant ends the association");
+}
+
 int main(void) {
 	test_autoconnect();
 	test_managed();
@@ -1150,5 +1226,6 @@ int main(void) {
 	test_wpa();
 	test_wifi_off();
 	test_wifi_nets();
+	test_wifi_assoc();
 	return test_summary();
 }

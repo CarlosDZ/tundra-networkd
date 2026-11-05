@@ -24,8 +24,8 @@ static const char *alerts;
 static int status(struct core_iface *ci, const struct profile *p, int conn,
                   const char *addr, const char *unmanaged, const char *want) {
 	char out[512];
-	struct iface_view v = {ci,   p,        conn,   addr, unmanaged,
-	                       kept, override, alerts, 0};
+	struct iface_view v = {ci,       p,      conn, addr, unmanaged, kept,
+	                       override, alerts, 0,    NULL, 0,         NULL};
 	return proto_status(&v, out, sizeof(out)) >= 0 && strcmp(out, want) == 0;
 }
 
@@ -62,16 +62,17 @@ int main(void) {
 	struct core_iface ci = {.name = "enp8s0", .st = C_RUNNING};
 	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
 	             "iface enp8s0 state connected profile casa address "
-	             "10.79.0.100/24 trusted no override - alert -"),
+	             "10.79.0.100/24 trusted no override - alert - ssid - bssid -"),
 	      "a connected interface");
 	CHECK(status(&ci, &p, 0, NULL, NULL,
 	             "iface enp8s0 state connecting profile casa address - "
-	             "trusted no override - alert -"),
+	             "trusted no override - alert - ssid - bssid -"),
 	      "a connection without lease");
 	kept = "profile casa has errors";
 	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
 	             "iface enp8s0 state connected profile casa address "
-	             "10.79.0.100/24 trusted no override - alert - -- previous "
+	             "10.79.0.100/24 trusted no override - alert - ssid - bssid - "
+	             "-- previous "
 	             "configuration kept: "
 	             "profile casa has errors"),
 	      "a connection kept by a reload says so");
@@ -79,66 +80,110 @@ int main(void) {
 	ci.st = C_IDLE;
 	CHECK(status(&ci, NULL, 0, NULL, NULL,
 	             "iface enp8s0 state idle profile - address - trusted - "
-	             "override - alert -"),
+	             "override - alert - ssid - bssid -"),
 	      "an idle interface");
 	CHECK(status(&ci, NULL, 0, NULL, "interfaces: line 2: unknown key speed",
 	             "iface enp8s0 state unmanaged profile - address - trusted - "
-	             "override - alert - "
+	             "override - alert - ssid - bssid - "
 	             "-- interfaces: line 2: unknown key speed"),
 	      "an unmanaged interface carries its error");
 	char out_off[512];
 	struct iface_view off = {.ci = &ci, .off = 1};
 	CHECK(proto_status(&off, out_off, sizeof(out_off)) >= 0 &&
-	          strcmp(out_off, "iface enp8s0 state off profile - address - "
-	                          "trusted - override - alert -") == 0,
+	          strcmp(out_off,
+	                 "iface enp8s0 state off profile - address - "
+	                 "trusted - override - alert - ssid - bssid -") == 0,
 	      "an interface with wifi = no is off");
 	ci.st = C_BLOCKED;
 	ci.blocked = B_CONFIG;
 	CHECK(status(&ci, &p, 0, NULL, NULL,
 	             "iface enp8s0 state blocked reason config profile casa "
-	             "address - trusted no override - alert -"),
+	             "address - trusted no override - alert - ssid - bssid -"),
 	      "a blocked interface carries its reason");
 	ci.st = C_BACKOFF;
 	CHECK(status(&ci, &p, 0, NULL, "x",
 	             "iface enp8s0 state retrying profile casa address - "
-	             "trusted no override - alert -"),
+	             "trusted no override - alert - ssid - bssid -"),
 	      "retrying, and the unmanaged error only shows when idle");
 	ci.st = C_WAIT_LINK;
 	CHECK(status(&ci, &p, 0, NULL, NULL,
 	             "iface enp8s0 state waiting profile casa address - "
-	             "trusted no override - alert -"),
+	             "trusted no override - alert - ssid - bssid -"),
 	      "waiting for the interface");
 	ci.st = C_STOPPING;
 	CHECK(status(&ci, &p, 0, NULL, NULL,
 	             "iface enp8s0 state stopping profile casa address - "
-	             "trusted no override - alert -"),
+	             "trusted no override - alert - ssid - bssid -"),
 	      "stopping");
 
 	ci.st = C_RUNNING;
 	override = 7;
 	alerts = "7,9";
-	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
-	             "iface enp8s0 state connected profile casa address "
-	             "10.79.0.100/24 trusted no override 7 alert 7,9"),
-	      "an alert lowers trust and pending alerts are listed");
+	CHECK(
+	    status(&ci, &p, 1, "10.79.0.100/24", NULL,
+	           "iface enp8s0 state connected profile casa address "
+	           "10.79.0.100/24 trusted no override 7 alert 7,9 ssid - bssid -"),
+	    "an alert lowers trust and pending alerts are listed");
 	p.trusted = 1;
-	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
-	             "iface enp8s0 state connected profile casa address "
-	             "10.79.0.100/24 trusted no override 7 alert 7,9"),
-	      "even on a trusted profile");
+	CHECK(
+	    status(&ci, &p, 1, "10.79.0.100/24", NULL,
+	           "iface enp8s0 state connected profile casa address "
+	           "10.79.0.100/24 trusted no override 7 alert 7,9 ssid - bssid -"),
+	    "even on a trusted profile");
 	override = 0;
 	alerts = NULL;
-	CHECK(status(&ci, &p, 1, "10.79.0.100/24", NULL,
-	             "iface enp8s0 state connected profile casa address "
-	             "10.79.0.100/24 trusted yes override - alert -"),
-	      "a trusted profile without alerts");
+	CHECK(
+	    status(&ci, &p, 1, "10.79.0.100/24", NULL,
+	           "iface enp8s0 state connected profile casa address "
+	           "10.79.0.100/24 trusted yes override - alert - ssid - bssid -"),
+	    "a trusted profile without alerts");
 	p.trusted = 0;
 
 	char out[512];
 	CHECK(proto_profile(&p, out, sizeof(out)) >= 0 &&
 	          strcmp(out, "profile casa interface enp8s0 autoconnect yes "
-	                      "trusted no") == 0,
-	      "a profile line");
+	                      "trusted no ssid - security -") == 0,
+	      "a profile line, without ssid nor security on a cable");
+	struct profile w = {.name = "cafe",
+	                    .interface = "wlp3s0",
+	                    .ssid = "caf\xc3\xa9 1",
+	                    .ssid_len = 7,
+	                    .has_ssid = 1,
+	                    .security = SEC_WPA3,
+	                    .valid = 1};
+	CHECK(proto_profile(&w, out, sizeof(out)) >= 0 &&
+	          strcmp(out, "profile cafe interface wlp3s0 autoconnect no "
+	                      "trusted no ssid caf%C3%A9%201 security wpa3") == 0,
+	      "a WiFi profile with its ssid encoded and its security");
+	w.security = SEC_OPEN;
+	CHECK(proto_profile(&w, out, sizeof(out)) >= 0 &&
+	          strstr(out, " security open"),
+	      "an open one");
+	struct iface_view assoc = {.ci = &ci,
+	                           .p = &p,
+	                           .connected = 1,
+	                           .address = "10.80.0.119/24",
+	                           .ssid = (const unsigned char *)"casa",
+	                           .ssid_len = 4,
+	                           .bssid = "02:00:00:00:00:00"};
+	CHECK(proto_status(&assoc, out, sizeof(out)) >= 0 &&
+	          strcmp(out, "iface enp8s0 state connected profile casa address "
+	                      "10.80.0.119/24 trusted no override - alert - ssid "
+	                      "casa bssid 02:00:00:00:00:00") == 0,
+	      "an associated interface shows ssid and bssid at the end");
+	char enc[8];
+	CHECK(proto_encode((const unsigned char *)"-", 1, enc, sizeof(enc)) > 0 &&
+	          strcmp(enc, "%2D") == 0,
+	      "an ssid that is just a dash is encoded");
+	CHECK(proto_encode((const unsigned char *)"a-b", 3, enc, sizeof(enc)) > 0 &&
+	          strcmp(enc, "a-b") == 0,
+	      "a dash inside is not");
+	CHECK(proto_encode((const unsigned char *)"\0\x7f", 2, enc, sizeof(enc)) >
+	              0 &&
+	          strcmp(enc, "%00%7F") == 0,
+	      "control bytes and NUL are encoded");
+	CHECK(proto_encode((const unsigned char *)"abcd", 4, enc, 4) < 0,
+	      "an encoding that does not fit is refused");
 	struct profile any = {
 	    .name = "999-dhcp", .any_interface = 1, .valid = 1, .autoconnect = 1};
 	CHECK(proto_profile(&any, out, sizeof(out)) >= 0 &&

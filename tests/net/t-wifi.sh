@@ -73,7 +73,7 @@ END
 check "RELOAD with wifi = no" reply_is "OK" RELOAD
 eventually "wpa_supplicant stops" 7 no_wpa
 eventually "the interface goes down" 3 wifi_down
-check "STATUS says off" status_has "iface $WIF state off profile - address - trusted - override - alert -"
+check "STATUS says off" status_has "iface $WIF state off profile - address - trusted - override - alert - ssid - bssid -"
 check "an autoconnect profile does not connect" test "$(launches)" -eq 0
 check "CONNECT says the wifi is off" reply_is "ERROR wifi is off" CONNECT casa
 in_ns ip link set "$WIF" up

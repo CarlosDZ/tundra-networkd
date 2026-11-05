@@ -23,6 +23,8 @@
 #define STATIC_FAIL (-1)
 #define STATIC_USAGE (-2)
 #define ACCEPTS_MAX 8
+#define WIFI_GRACE_MS 3000
+#define BSSID_MAX 18
 #define LINK_PHYSICAL 1
 #define LINK_WIRELESS 2
 #define LINK_UP 4
@@ -88,6 +90,12 @@ struct core_iface {
 	unsigned int stop_id;
 	enum wpa_state wst;
 	char wselect[PROFILE_NAME_MAX + 1];
+	unsigned char cssid[SSID_MAX];
+	size_t cssid_len;
+	int associated;
+	unsigned char assid[SSID_MAX];
+	size_t assid_len;
+	char bssid[BSSID_MAX];
 	unsigned int w_backoff_ms;
 	uint64_t w_started_at;
 	uint64_t w_retry_at;
@@ -189,6 +197,10 @@ void core_static_result(struct core *c, const char *ifname, int rc,
                         uint64_t now, struct actions *out);
 void core_wpa_exit(struct core *c, const char *ifname, int status, uint64_t now,
                    struct actions *out);
+void core_wifi_assoc(struct core *c, const char *ifname, const char *id_str,
+                     const unsigned char *ssid, size_t ssid_len,
+                     const char *bssid, uint64_t now, struct actions *out);
+void core_wifi_lost(struct core *c, const char *ifname);
 void core_stop(struct core *c, const char *ifname, int level, unsigned int id,
                uint64_t now, struct actions *out);
 void core_note_alert(struct core *c, const char *ifname, int level,

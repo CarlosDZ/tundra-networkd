@@ -656,19 +656,34 @@ static void on_wpa_dir(struct daemon *d) {
 	}
 }
 
-static void on_wpa_event(struct child *k) {
+static void on_wpa_event(struct daemon *d, struct child *k) {
 	char msg[WPA_EVENT_MAX];
 	int n;
 	while (k->wpa.mon >= 0 &&
 	       (n = wpa_event_read(k->wpa.mon, msg, sizeof(msg))) > 0) {
 		struct wpa_event ev;
+		struct wpa_status st;
+		struct actions acts = {0};
 		if (wpactl_event(msg, (size_t)n, &ev) < 0)
 			continue;
-		if (ev.type == WPA_EV_CONNECTED)
+		if (ev.type == WPA_EV_CONNECTED) {
 			printf("networkd: %s: associated with %s\n", k->ifname, ev.bssid);
-		else if (ev.type == WPA_EV_DISCONNECTED)
+			n = wpa_cmd(k, msg, sizeof(msg), "STATUS");
+			if (n < 0 || wpactl_status(msg, strlen(msg), &st) < 0) {
+				printf("networkd: %s: no STATUS from wpa_supplicant\n",
+				       k->ifname);
+				continue;
+			}
+			core_wifi_assoc(&d->core, k->ifname, st.id_str, st.ssid,
+			                st.ssid_len, st.bssid, now_ms(), &acts);
+			execute(d, &acts);
+			d->dirty = 1;
+		} else if (ev.type == WPA_EV_DISCONNECTED) {
 			printf("networkd: %s: disassociated from %s (reason %d)\n",
 			       k->ifname, ev.bssid, ev.reason);
+			core_wifi_lost(&d->core, k->ifname);
+			d->dirty = 1;
+		}
 	}
 }
 
@@ -935,6 +950,9 @@ static void reply_status(struct daemon *d, int client) {
 		    .kept = ci->kept,
 		    .override = ci->override,
 		    .off = core_wifi_off(&d->core, ci->name),
+		    .ssid = ci->associated ? ci->assid : NULL,
+		    .ssid_len = ci->assid_len,
+		    .bssid = ci->associated && ci->bssid[0] ? ci->bssid : NULL,
 		};
 		char ids[REPLY_MAX];
 		if (alerts_ids_on(&d->alerts, ci->name, ids, sizeof(ids)) == 0)
@@ -1214,7 +1232,7 @@ int loop_run(struct config *cfg) {
 			else if (type == T_WPA_DIR)
 				on_wpa_dir(&d);
 			else if (type == T_WPA && idx < CHILDREN_MAX && d.kids[idx].used)
-				on_wpa_event(&d.kids[idx]);
+				on_wpa_event(&d, &d.kids[idx]);
 			else if (type == T_LISTEN)
 				server_accept(&d.srv);
 			else if (type == T_CLIENT && idx < SERVER_CLIENTS) {

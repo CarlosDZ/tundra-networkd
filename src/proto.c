@@ -103,6 +103,35 @@ static int fit(int n, size_t size) {
 	return n < 0 || (size_t)n >= size ? -1 : n;
 }
 
+static int safe(unsigned char c) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || (c && strchr("._:@,/-", c));
+}
+
+/* ADR-025: bytes outside [A-Za-z0-9._:@,/-] go as %XX. A lone "-" too, since
+ * that stands for no value. */
+int proto_encode(const unsigned char *in, size_t len, char *out, size_t size) {
+	static const char hex[] = "0123456789ABCDEF";
+	size_t n = 0;
+	if (len == 0)
+		return -1;
+	for (size_t i = 0; i < len; i++) {
+		if (safe(in[i]) && !(len == 1 && in[i] == '-')) {
+			if (n + 1 >= size)
+				return -1;
+			out[n++] = (char)in[i];
+			continue;
+		}
+		if (n + 3 >= size)
+			return -1;
+		out[n++] = '%';
+		out[n++] = hex[in[i] >> 4];
+		out[n++] = hex[in[i] & 15];
+	}
+	out[n] = '\0';
+	return (int)n;
+}
+
 int proto_status(const struct iface_view *v, char *out, size_t size) {
 	const struct core_iface *ci = v->ci;
 	const char *lead = "", *note = NULL;
@@ -115,28 +144,53 @@ int proto_status(const struct iface_view *v, char *out, size_t size) {
 	char override[16] = "-";
 	if (v->p && v->override)
 		snprintf(override, sizeof(override), "%u", v->override);
-	int n =
-	    snprintf(out, size,
-	             "iface %s state %s%s profile %s address %s trusted %s "
-	             "override %s alert %s%s%s%s",
-	             ci->name, state_name(v),
-	             ci->st == C_BLOCKED ? block_reason(ci->blocked) : "",
-	             v->p ? v->p->name : "-", v->address ? v->address : "-",
-	             v->p ? (v->p->trusted && !v->override ? "yes" : "no") : "-",
-	             override, v->alerts ? v->alerts : "-", note ? " -- " : "",
-	             lead, note ? note : "");
+	char ssid[3 * SSID_MAX + 1] = "-";
+	if (v->ssid && proto_encode(v->ssid, v->ssid_len, ssid, sizeof(ssid)) < 0)
+		return -1;
+	int n = snprintf(
+	    out, size,
+	    "iface %s state %s%s profile %s address %s trusted %s "
+	    "override %s alert %s ssid %s bssid %s%s%s%s",
+	    ci->name, state_name(v),
+	    ci->st == C_BLOCKED ? block_reason(ci->blocked) : "",
+	    v->p ? v->p->name : "-", v->address ? v->address : "-",
+	    v->p ? (v->p->trusted && !v->override ? "yes" : "no") : "-", override,
+	    v->alerts ? v->alerts : "-", ssid, v->bssid ? v->bssid : "-",
+	    note ? " -- " : "", lead, note ? note : "");
 	return fit(n, size);
+}
+
+static const char *security_name(const struct profile *p) {
+	if (!p->has_ssid)
+		return "-";
+	switch (p->security) {
+	case SEC_WPA3:
+		return "wpa3";
+	case SEC_WPA2:
+		return "wpa2";
+	case SEC_OPEN:
+	case SEC_NONE:
+		break;
+	}
+	return "open";
 }
 
 int proto_profile(const struct profile *p, char *out, size_t size) {
 	int n;
 	if (!p->valid)
 		n = snprintf(out, size, "profile %s invalid -- %s", p->name, p->error);
-	else
+	else {
+		char ssid[3 * SSID_MAX + 1] = "-";
+		if (p->has_ssid &&
+		    proto_encode(p->ssid, p->ssid_len, ssid, sizeof(ssid)) < 0)
+			return -1;
 		n = snprintf(out, size,
-		             "profile %s interface %s autoconnect %s trusted %s",
+		             "profile %s interface %s autoconnect %s trusted %s "
+		             "ssid %s security %s",
 		             p->name, p->any_interface ? "*" : p->interface,
-		             p->autoconnect ? "yes" : "no", p->trusted ? "yes" : "no");
+		             p->autoconnect ? "yes" : "no", p->trusted ? "yes" : "no",
+		             ssid, security_name(p));
+	}
 	return fit(n, size);
 }
 

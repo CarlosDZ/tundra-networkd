@@ -39,8 +39,8 @@ write_lease "$IF-casa" "10.0.0.1" "$NET.204" "$NET.1"
 expect_log "$IF: relaunching tundra-blueice-arp in 1000 ms" 3 "a failing sensor is relaunched with backoff"
 expect_log "$IF: tundra-blueice-arp failed 3 times in a row" 6 "the third failure in a row"
 eventually "stops the connection" 3 dhcpc_got "$pid" USR1
-eventually "and leaves it stopped" 3 status_has "iface $IF state blocked reason alert profile casa address - trusted no override - alert 1"
-check "the other interface is not touched" status_has "iface $IF2 state connecting profile otra address - trusted no override - alert -"
+eventually "and leaves it stopped" 3 status_has "iface $IF state blocked reason alert profile casa address - trusted no override - alert 1 ssid - bssid -"
+check "the other interface is not touched" status_has "iface $IF2 state connecting profile otra address - trusted no override - alert - ssid - bssid -"
 stop_daemon
 expect_exit 0 "the daemon stops"
 
@@ -58,7 +58,7 @@ pid2=$(child_pid otra)
 write_lease "$IF-casa" "10.0.0.1" "$NET.200" "$NET.1"
 expect_log "blueice-arp\[$IF\]: alert 111/8 stop by tundra-blueice-arp on $IF " 3 "the sensor raises a stop of level 8"
 eventually "dhcpc releases that interface" 3 dhcpc_got "$pid" USR1
-eventually "which stays stopped" 3 status_has "iface $IF state blocked reason alert profile casa address - trusted no override 1 alert 1"
+eventually "which stays stopped" 3 status_has "iface $IF state blocked reason alert profile casa address - trusted no override 1 alert 1 ssid - bssid -"
 sleep 0.5
 check "the other interface is not touched" sh -c "! grep -q '^$pid2 ' '$DHCPC_FAKE_DIR/signals'"
 check "nothing autoconnects on the stopped interface" [ "$(launches)" -eq 2 ]
@@ -79,7 +79,7 @@ pid2=$(child_pid otra)
 write_lease "$IF-casa" "10.0.0.1" "$NET.200" "$NET.1"
 eventually "level 9 releases this interface" 3 dhcpc_got "$pid" USR1
 eventually "and the other one" 3 dhcpc_got "$pid2" USR1
-eventually "both stay stopped" 3 status_has "iface $IF2 state blocked reason alert profile otra address - trusted no override 1 alert -"
+eventually "both stay stopped" 3 status_has "iface $IF2 state blocked reason alert profile otra address - trusted no override 1 alert - ssid - bssid -"
 stop_daemon
 
 setup
@@ -101,7 +101,7 @@ cable_profile casa
 fake forge
 start_daemon
 expect_log "$IF: alert by tundra-evil discarded on the pipe of tundra-dhcpc" 5 "dhcpc cannot pass an alert from an unknown package"
-check "and keeps running" status_has "iface $IF state connecting profile casa address - trusted no override - alert -"
+check "and keeps running" status_has "iface $IF state connecting profile casa address - trusted no override - alert - ssid - bssid -"
 stop_daemon
 
 setup
@@ -109,7 +109,7 @@ cable_profile casa
 fake alert
 start_daemon
 expect_log "dhcpc\[$IF/casa\]: alert 111/4 stop by tundra-blueice-arp " 5 "the probe of dhcpc raises a stop"
-eventually "the interface stays stopped" 3 status_has "iface $IF state blocked reason alert profile casa address - trusted no override - alert 1"
+eventually "the interface stays stopped" 3 status_has "iface $IF state blocked reason alert profile casa address - trusted no override - alert 1 ssid - bssid -"
 sleep 1.5
 check "without relaunching dhcpc" [ "$(launches)" -eq 1 ]
 
