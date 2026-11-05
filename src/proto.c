@@ -64,7 +64,7 @@ void proto_parse(const char *line, struct cmd *out) {
 static const char *state_name(const struct iface_view *v) {
 	switch (v->ci->st) {
 	case C_IDLE:
-		return v->unmanaged ? "unmanaged" : "idle";
+		return v->unmanaged ? "unmanaged" : v->off ? "off" : "idle";
 	case C_RUNNING:
 		return v->connected ? "connected" : "connecting";
 	case C_PROBING:
@@ -169,6 +169,8 @@ const char *proto_connect_error(enum connect_result r) {
 		return "ERROR profile rejected by tundra-dhcpc, reload first";
 	case CONNECT_ALERT_PENDING:
 		return "ERROR alert pending, answer it first";
+	case CONNECT_OFF:
+		return "ERROR wifi is off";
 	}
 	return "ERROR unknown error";
 }

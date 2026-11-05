@@ -24,11 +24,32 @@ int main(void) {
 	      "a WiFi block");
 	CHECK(get("eth9") == NULL, "an interface without block is not found");
 
-	parse("enp8s0 {\n wifi = yes\n}\nwlp3s0 {\n metric = 1\n}\n");
+	parse("wlp3s0 {\n wifi = no\n}\nwlp4s0 {\n wifi = yes\n}\n");
+	CHECK(get("wlp3s0")->valid && get("wlp3s0")->has_wifi &&
+	          !get("wlp3s0")->wifi && get("wlp4s0")->has_wifi &&
+	          get("wlp4s0")->wifi,
+	      "wifi = no and wifi = yes");
+	CHECK(strcmp(get("wlp3s0")->wired_error,
+	             "line 2: wifi on a wired interface") == 0,
+	      "with the error for a wired interface ready");
+	parse("wlp3s0 {\n metric = 1\n}\n");
+	CHECK(!get("wlp3s0")->has_wifi, "without the key, nothing is said");
+	parse("wlp3s0 {\n wifi = off\n}\nenp8s0 {\n metric = 1\n}\n");
+	CHECK(f.valid && !get("wlp3s0")->valid &&
+	          strstr(get("wlp3s0")->error, "invalid wifi: off") &&
+	          get("enp8s0")->valid,
+	      "an invalid wifi only spoils its block");
+	parse("wlp3s0 {\n wifi = \"no\"\n}\n");
+	CHECK(!get("wlp3s0")->valid, "a quoted wifi");
+	parse("wlp3s0 {\n wifi = no\n wifi = yes\n}\n");
+	CHECK(!get("wlp3s0")->valid &&
+	          strstr(get("wlp3s0")->error, "repeated key wifi"),
+	      "a repeated wifi");
+	parse("enp8s0 {\n speed = 100\n}\nwlp3s0 {\n metric = 1\n}\n");
 	CHECK(f.valid && !get("enp8s0")->valid &&
-	          strstr(get("enp8s0")->error, "unknown key wifi") &&
+	          strstr(get("enp8s0")->error, "unknown key speed") &&
 	          get("wlp3s0")->valid,
-	      "wifi is an unknown key and only spoils its block");
+	      "an unknown key only spoils its block");
 
 	parse("enp8s0 {\n metric = 1\n metric = 2\n}\n");
 	CHECK(!get("enp8s0")->valid &&

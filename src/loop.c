@@ -11,6 +11,8 @@
 #include "server.h"
 #include "spawn.h"
 #include "static.h"
+#include "wpa.h"
+#include "wpactl.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -28,7 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define CHILDREN_MAX (CORE_IFACES * 2)
+#define CHILDREN_MAX (CORE_IFACES * 3)
 #define OUT_LINE_MAX 512
 #define DHCPC_LEASE_DIR "/run/tundra/dhcpc"
 #define LEASE_FILE_MAX 1024
@@ -39,10 +41,14 @@
 #define T_CHILD 4
 #define T_LISTEN 5
 #define T_CLIENT 6
+#define T_WPA_DIR 7
+#define T_WPA 8
 #define REPLY_MAX 768
 #define ALERTS_PATH TUNDRA_NETWORKD_RUN_DIR "/alerts"
 #define ALERT_ID_PATH TUNDRA_NETWORKD_RUN_DIR "/alert-id"
 #define ALERTS_FILE_MAX (ALERTS_MAX * REPLY_MAX)
+#define WPA_DIR TUNDRA_NETWORKD_RUN_DIR "/wpa"
+#define WPA_EVENT_MAX 4096
 
 struct child {
 	int used;
@@ -58,6 +64,7 @@ struct child {
 	char profile[PROFILE_NAME_MAX + 1];
 	char line[OUT_LINE_MAX];
 	size_t len;
+	struct wpa_conn wpa;
 };
 
 struct conn_view {
@@ -74,6 +81,7 @@ struct daemon {
 	int sfd;
 	int lfd;
 	int ifd;
+	int wfd;
 	struct child kids[CHILDREN_MAX];
 	struct server srv;
 	struct conn_view view[CORE_IFACES];
@@ -227,6 +235,11 @@ static void handle_alert(struct daemon *d, struct child *k) {
 static void emit_line(struct daemon *d, struct child *k) {
 	k->line[k->len] = '\0';
 	k->len = 0;
+	if (k->kind == K_WPA) {
+		k->line[strcspn(k->line, "\r")] = '\0';
+		printf("wpa[%s]: %s\n", k->ifname, k->line);
+		return;
+	}
 	if (k->kind == K_DHCPC)
 		printf("dhcpc[%s/%s]: %s\n", k->ifname, k->profile, k->line);
 	else
@@ -299,7 +312,9 @@ static struct child *new_child(struct daemon *d, const char *path,
 		if (!d->kids[i].used)
 			k = &d->kids[i];
 	int fd = -1;
-	pid_t pid = k ? spawn_child(path, argv, &fd) : -1;
+	pid_t pid = !k              ? -1
+	            : kind == K_WPA ? spawn_child_tty(path, argv, &fd)
+	                            : spawn_child(path, argv, &fd);
 	if (pid < 0)
 		return NULL;
 	memset(k, 0, sizeof(*k));
@@ -307,6 +322,7 @@ static struct child *new_child(struct daemon *d, const char *path,
 	k->pid = pid;
 	k->fd = fd;
 	k->kind = kind;
+	k->wpa.ctl = k->wpa.mon = -1;
 	snprintf(k->ifname, sizeof(k->ifname), "%s", ifname);
 	snprintf(k->profile, sizeof(k->profile), "%s", profile);
 	watch_fd(d, fd, ((uint64_t)T_CHILD << 32) | (uint64_t)(k - d->kids));
@@ -411,6 +427,87 @@ static void spawn_dhcpc(struct daemon *d, const struct action *a) {
 	       a->iface, a->profile, (int)k->pid);
 }
 
+static void wpa_failed(struct daemon *d, const char *ifname) {
+	struct actions acts = {0};
+	core_wpa_exit(&d->core, ifname, 1 << 8, now_ms(), &acts);
+	execute(d, &acts);
+}
+
+static void spawn_wpa(struct daemon *d, const struct action *a) {
+	char conf[PATH_MAX], text[PATH_MAX + 64];
+	snprintf(conf, sizeof(conf), "%s/%s.conf", WPA_DIR, a->iface);
+	int n = snprintf(text, sizeof(text), "ctrl_interface=%s\nupdate_config=0\n",
+	                 WPA_DIR);
+	if (files_make_dirs(WPA_DIR, 0700) < 0 ||
+	    files_write_atomic(conf, text, (size_t)n, 0600) < 0) {
+		fprintf(stderr, "networkd: %s: cannot write %s: %s\n", a->iface, conf,
+		        strerror(errno));
+		wpa_failed(d, a->iface);
+		return;
+	}
+	char *argv[] = {"wpa_supplicant",
+	                "-i",
+	                (char *)a->iface,
+	                "-D",
+	                "nl80211",
+	                "-c",
+	                conf,
+	                NULL};
+	struct child *k =
+	    new_child(d, TUNDRA_WPA_SUPPLICANT_PATH, argv, K_WPA, a->iface, "");
+	if (!k) {
+		fprintf(stderr, "networkd: %s: cannot launch wpa_supplicant\n",
+		        a->iface);
+		wpa_failed(d, a->iface);
+		return;
+	}
+	printf("networkd: %s: wpa_supplicant started (pid %d)\n", a->iface,
+	       (int)k->pid);
+}
+
+static void wpa_detach(struct daemon *d, struct child *k) {
+	if (k->wpa.mon >= 0)
+		epoll_ctl(d->ep, EPOLL_CTL_DEL, k->wpa.mon, NULL);
+	wpa_close(&k->wpa);
+}
+
+static void wpa_attach(struct daemon *d, struct child *k) {
+	if (wpa_connect(WPA_DIR, k->ifname, &k->wpa) < 0) {
+		printf("networkd: %s: cannot attach to wpa_supplicant: %s\n", k->ifname,
+		       strerror(errno));
+		kill(k->pid, SIGTERM);
+		return;
+	}
+	watch_fd(d, k->wpa.mon, ((uint64_t)T_WPA << 32) | (uint64_t)(k - d->kids));
+	printf("networkd: %s: wpa_supplicant ready\n", k->ifname);
+}
+
+static void on_wpa_dir(struct daemon *d) {
+	char names[WPA_WATCH_MAX][IF_NAMESIZE];
+	int n = wpa_watch_read(d->wfd, names, WPA_WATCH_MAX);
+	for (int i = 0; i < n; i++) {
+		struct child *k = running_child(d, names[i], K_WPA);
+		if (k && k->wpa.ctl < 0)
+			wpa_attach(d, k);
+	}
+}
+
+static void on_wpa_event(struct child *k) {
+	char msg[WPA_EVENT_MAX];
+	int n;
+	while (k->wpa.mon >= 0 &&
+	       (n = wpa_event_read(k->wpa.mon, msg, sizeof(msg))) > 0) {
+		struct wpa_event ev;
+		if (wpactl_event(msg, (size_t)n, &ev) < 0)
+			continue;
+		if (ev.type == WPA_EV_CONNECTED)
+			printf("networkd: %s: associated with %s\n", k->ifname, ev.bssid);
+		else if (ev.type == WPA_EV_DISCONNECTED)
+			printf("networkd: %s: disassociated from %s (reason %d)\n",
+			       k->ifname, ev.bssid, ev.reason);
+	}
+}
+
 static void execute(struct daemon *d, struct actions *acts) {
 	for (int i = 0; i < acts->n; i++) {
 		const struct action *a = &acts->a[i];
@@ -425,6 +522,14 @@ static void execute(struct daemon *d, struct actions *acts) {
 			break;
 		case A_SPAWN_PROBE:
 			spawn_probe(d, a);
+			break;
+		case A_SPAWN_WPA:
+			spawn_wpa(d, a);
+			break;
+		case A_LINK_DOWN:
+			if (static_link_down(a) < 0)
+				printf("networkd: %s: cannot bring the interface down\n",
+				       a->iface);
 			break;
 		case A_STATIC_APPLY: {
 			struct actions next = {0};
@@ -454,12 +559,20 @@ static void execute(struct daemon *d, struct actions *acts) {
 	acts->n = 0;
 }
 
-static int is_physical(const char *name, unsigned short arptype) {
+static int in_sysfs(const char *name, const char *entry) {
 	char path[256];
-	if (arptype != ARPHRD_ETHER)
-		return 0;
-	snprintf(path, sizeof(path), "%s/%s/device", TUNDRA_NETWORKD_SYSFS, name);
+	snprintf(path, sizeof(path), "%s/%s/%s", TUNDRA_NETWORKD_SYSFS, name,
+	         entry);
 	return access(path, F_OK) == 0;
+}
+
+static unsigned int link_flags(const struct link_ev *ev) {
+	unsigned int flags = ev->up ? LINK_UP : 0;
+	if (ev->arptype == ARPHRD_ETHER && in_sysfs(ev->name, "device"))
+		flags |= LINK_PHYSICAL;
+	if (in_sysfs(ev->name, "phy80211"))
+		flags |= LINK_WIRELESS;
+	return flags;
 }
 
 static int on_link(struct daemon *d) {
@@ -475,8 +588,7 @@ static int on_link(struct daemon *d) {
 		if (evs[i].gone)
 			core_link_gone(&d->core, evs[i].name, now, &acts);
 		else
-			core_link(&d->core, evs[i].name,
-			          is_physical(evs[i].name, evs[i].arptype), now, &acts);
+			core_link(&d->core, evs[i].name, link_flags(&evs[i]), now, &acts);
 		execute(d, &acts);
 	}
 	return 0;
@@ -517,9 +629,12 @@ static void reap(struct daemon *d) {
 			char ifname[IF_NAMESIZE];
 			struct child done = *k;
 			snprintf(ifname, sizeof(ifname), "%s", k->ifname);
+			wpa_detach(d, k);
 			if (k->fd < 0)
 				k->used = 0;
-			if (done.kind == K_SENSOR)
+			if (done.kind == K_WPA)
+				core_wpa_exit(&d->core, ifname, status, now_ms(), &acts);
+			else if (done.kind == K_SENSOR)
 				core_sensor_exit(&d->core, ifname, status,
 				                 done.conflict_mac[0] ? done.conflict_mac
 				                                      : NULL,
@@ -651,6 +766,7 @@ static void reply_status(struct daemon *d, int client) {
 		    .address = d->view[i].connected ? d->view[i].address : NULL,
 		    .kept = ci->kept,
 		    .override = ci->override,
+		    .off = core_wifi_off(&d->core, ci->name),
 		};
 		char ids[REPLY_MAX];
 		if (alerts_ids_on(&d->alerts, ci->name, ids, sizeof(ids)) == 0)
@@ -866,7 +982,7 @@ int loop_run(struct config *cfg) {
 	d.cfg = cfg;
 	d.spare = &spare;
 	for (int i = 0; i < CHILDREN_MAX; i++)
-		d.kids[i].fd = -1;
+		d.kids[i].fd = d.kids[i].wpa.ctl = d.kids[i].wpa.mon = -1;
 	core_init(&d.core, cfg);
 	load_alerts(&d);
 	d.dirty = 1;
@@ -876,10 +992,12 @@ int loop_run(struct config *cfg) {
 	d.sfd = open_signals();
 	d.lfd = link_open();
 	d.ifd = lease_watch_open(DHCPC_LEASE_DIR);
-	if (d.ep < 0 || d.sfd < 0 || d.lfd < 0 || d.ifd < 0 ||
+	d.wfd = wpa_watch_open(WPA_DIR);
+	if (d.ep < 0 || d.sfd < 0 || d.lfd < 0 || d.ifd < 0 || d.wfd < 0 ||
 	    watch_fd(&d, d.sfd, (uint64_t)T_SIGNAL << 32) < 0 ||
 	    watch_fd(&d, d.lfd, (uint64_t)T_LINK << 32) < 0 ||
 	    watch_fd(&d, d.ifd, (uint64_t)T_LEASE << 32) < 0 ||
+	    watch_fd(&d, d.wfd, (uint64_t)T_WPA_DIR << 32) < 0 ||
 	    server_open(&d.srv, TUNDRA_NETWORKD_SOCKET, d.ep,
 	                (uint64_t)T_LISTEN << 32, (uint64_t)T_CLIENT << 32) < 0 ||
 	    link_dump(d.lfd) < 0) {
@@ -925,6 +1043,10 @@ int loop_run(struct config *cfg) {
 				on_lease(&d);
 			else if (type == T_CHILD && idx < CHILDREN_MAX && d.kids[idx].used)
 				drain(&d, &d.kids[idx]);
+			else if (type == T_WPA_DIR)
+				on_wpa_dir(&d);
+			else if (type == T_WPA && idx < CHILDREN_MAX && d.kids[idx].used)
+				on_wpa_event(&d.kids[idx]);
 			else if (type == T_LISTEN)
 				server_accept(&d.srv);
 			else if (type == T_CLIENT && idx < SERVER_CLIENTS) {

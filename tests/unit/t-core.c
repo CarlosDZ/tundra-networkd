@@ -119,7 +119,21 @@ static void test_managed(void) {
 	core_link(&c, "tnd1", 1, 0, &out);
 	CHECK(count(A_SPAWN_DHCPC) == 1 &&
 	          strcmp(find_act(A_SPAWN_DHCPC)->iface, "tnd1") == 0 &&
-	          logged("unknown key wifi"),
+	          logged("not managed: line 2: wifi on a wired interface"),
+	      "wifi on a cable only leaves that interface unmanaged");
+	CHECK(core_unmanaged(&c, "tnd0") &&
+	          strcmp(core_unmanaged(&c, "tnd0"),
+	                 "line 2: wifi on a wired interface") == 0,
+	      "and STATUS gets the reason");
+
+	reset("tnd0 {\n metric = x\n}\n");
+	add("10-a", "tnd0", AUTO);
+	add("20-b", "tnd1", AUTO);
+	core_link(&c, "tnd0", 1, 0, &out);
+	core_link(&c, "tnd1", 1, 0, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 1 &&
+	          strcmp(find_act(A_SPAWN_DHCPC)->iface, "tnd1") == 0 &&
+	          logged("invalid metric"),
 	      "an invalid block only leaves that interface unmanaged");
 
 	reset("");
@@ -886,6 +900,147 @@ static void test_static(void) {
 	      "the shutdown leaves the static address in place");
 }
 
+#define WL (LINK_PHYSICAL | LINK_WIRELESS)
+#define WL_UP (WL | LINK_UP)
+
+static enum wpa_state wst(const char *ifname) {
+	return core_find(&c, ifname)->wst;
+}
+
+static const struct action *wpa_signal(void) {
+	for (int i = 0; i < out.n; i++)
+		if (out.a[i].type == A_SIGNAL && out.a[i].kind == K_WPA)
+			return &out.a[i];
+	return NULL;
+}
+
+static void test_wpa(void) {
+	reset("");
+	core_link(&c, "wl0", WL_UP, 0, &out);
+	const struct action *a = find_act(A_SPAWN_WPA);
+	CHECK(a && a->kind == K_WPA && strcmp(a->iface, "wl0") == 0 &&
+	          wst("wl0") == W_RUNNING,
+	      "a wireless interface gets its wpa_supplicant");
+	out.n = 0;
+	core_link(&c, "wl0", WL, 10, &out);
+	CHECK(count(A_SPAWN_WPA) == 0 && count(A_LINK_DOWN) == 0,
+	      "a second link event does not launch another one");
+	core_link(&c, "tnd0", LINK_PHYSICAL | LINK_UP, 10, &out);
+	CHECK(count(A_SPAWN_WPA) == 0, "a cable does not get one");
+
+	out.n = 0;
+	core_wpa_exit(&c, "wl0", EXITED(0), 100, &out);
+	CHECK(wst("wl0") == W_BACKOFF && logged("wpa_supplicant exited with 0") &&
+	          logged("relaunching wpa_supplicant in 1000 ms") &&
+	          core_next_deadline(&c) == 1100,
+	      "an unasked exit, even with 0, is relaunched with backoff");
+	out.n = 0;
+	core_timer(&c, 1099, &out);
+	CHECK(count(A_SPAWN_WPA) == 0, "not before its time");
+	core_timer(&c, 1100, &out);
+	CHECK(count(A_SPAWN_WPA) == 1 && wst("wl0") == W_RUNNING,
+	      "and relaunched when it comes");
+	out.n = 0;
+	core_wpa_exit(&c, "wl0", 9, 1200, &out);
+	CHECK(logged("wpa_supplicant killed by signal 9") &&
+	          logged("relaunching wpa_supplicant in 2000 ms"),
+	      "a kill counts the same, and the backoff doubles");
+	core_timer(&c, 3200, &out);
+	out.n = 0;
+	core_wpa_exit(&c, "wl0", EXITED(1), 3200 + STABLE_MS, &out);
+	CHECK(logged("relaunching wpa_supplicant in 1000 ms"),
+	      "after a stable minute the backoff starts over");
+	core_timer(&c, 4200 + STABLE_MS, &out);
+
+	out.n = 0;
+	core_link_gone(&c, "wl0", 70000, &out);
+	CHECK(wpa_signal() && wpa_signal()->sig == SIGTERM &&
+	          wst("wl0") == W_STOPPING,
+	      "a removed interface stops its wpa_supplicant");
+	out.n = 0;
+	core_timer(&c, 70000 + STOP_TIMEOUT_MS, &out);
+	CHECK(wpa_signal() && wpa_signal()->sig == SIGKILL &&
+	          logged("wpa_supplicant did not stop in 5 s, killed"),
+	      "and kills it if it does not stop");
+	out.n = 0;
+	core_wpa_exit(&c, "wl0", 9, 76000, &out);
+	CHECK(wst("wl0") == W_OFF && count(A_SPAWN_WPA) == 0 && out.n == 0,
+	      "an asked exit is not relaunched");
+	core_link(&c, "wl0", WL, 77000, &out);
+	CHECK(count(A_SPAWN_WPA) == 1, "the interface comes back with a new one");
+
+	out.n = 0;
+	core_wpa_exit(&c, "wl0", EXITED(1), 78000, &out);
+	core_link_gone(&c, "wl0", 78100, &out);
+	CHECK(wst("wl0") == W_OFF && core_next_deadline(&c) == UINT64_MAX,
+	      "a removed interface cancels the relaunch");
+
+	reset("");
+	core_link(&c, "wl0", WL, 0, &out);
+	out.n = 0;
+	core_shutdown(&c, 10, &out);
+	CHECK(wpa_signal() && wpa_signal()->sig == SIGTERM && !core_done(&c),
+	      "shutdown stops wpa_supplicant and waits for it");
+	core_wpa_exit(&c, "wl0", EXITED(0), 20, &out);
+	CHECK(core_done(&c) && count(A_SPAWN_WPA) == 0, "then it is done");
+}
+
+static void test_wifi_off(void) {
+	reset("wl0 {\n wifi = no\n}\n");
+	add("10-a", "wl0", AUTO);
+	core_link(&c, "wl0", WL_UP, 0, &out);
+	CHECK(count(A_SPAWN_WPA) == 0 && count(A_SPAWN_DHCPC) == 0 &&
+	          core_wifi_off(&c, "wl0"),
+	      "wifi = no: no wpa_supplicant and no connection");
+	CHECK(count(A_LINK_DOWN) == 1 &&
+	          logged("wifi is off, bringing the interface down"),
+	      "and the interface goes down");
+	out.n = 0;
+	core_link(&c, "wl0", WL, 10, &out);
+	CHECK(out.n == 0, "once down, nothing more");
+	core_link(&c, "wl0", WL_UP, 20, &out);
+	CHECK(count(A_LINK_DOWN) == 1, "brought up by hand, it goes down again");
+	out.n = 0;
+	CHECK(core_connect(&c, "10-a", "wl0", 30, &out) == CONNECT_OFF &&
+	          out.n == 0,
+	      "CONNECT says the wifi is off");
+
+	reset("tnd0 {\n wifi = no\n}\n");
+	core_link(&c, "tnd0", LINK_PHYSICAL | LINK_UP, 0, &out);
+	CHECK(count(A_LINK_DOWN) == 0 && !core_wifi_off(&c, "tnd0"),
+	      "a cable with wifi = no is unmanaged, not brought down");
+
+	cur = 0;
+	build(&k[0], "", "wl0", AUTO);
+	core_init(&c, &k[0]);
+	out.n = 0;
+	core_link(&c, "wl0", WL_UP, 0, &out);
+	CHECK(count(A_SPAWN_WPA) == 1 && count(A_SPAWN_DHCPC) == 1,
+	      "a profile without ssid connects on a wireless interface");
+	reload("wl0 {\n wifi = no\n}\n", "wl0", AUTO, 1000);
+	CHECK(logged("wifi is off, disconnecting") && count(A_SIGNAL) == 2 &&
+	          wpa_signal() && wpa_signal()->sig == SIGTERM &&
+	          count(A_LINK_DOWN) == 1,
+	      "a reload to wifi = no disconnects, stops wpa_supplicant and "
+	      "brings the interface down");
+	out.n = 0;
+	core_child_exit(&c, "wl0", EXITED(0), 1100, &out);
+	core_wpa_exit(&c, "wl0", EXITED(0), 1100, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 0 && count(A_SPAWN_WPA) == 0 &&
+	          st("wl0") == C_IDLE && wst("wl0") == W_OFF,
+	      "and nothing comes back");
+	reload("wl0 {\n metric = x\n}\n", "wl0", AUTO, 2000);
+	CHECK(count(A_SPAWN_WPA) == 0 && count(A_SPAWN_DHCPC) == 0,
+	      "an invalid block does not turn it back on");
+	reload("", "wl0", AUTO, 3000);
+	CHECK(count(A_SPAWN_WPA) == 1 && count(A_SPAWN_DHCPC) == 1 &&
+	          !core_wifi_off(&c, "wl0"),
+	      "a reload to wifi = yes launches both again");
+	reload("wl0 {\n metric = x\n}\n", "wl0", AUTO, 4000);
+	CHECK(!wpa_signal() && wst("wl0") == W_RUNNING,
+	      "an invalid block keeps wpa_supplicant running");
+}
+
 int main(void) {
 	test_autoconnect();
 	test_managed();
@@ -900,5 +1055,7 @@ int main(void) {
 	test_stop();
 	test_alerts();
 	test_static();
+	test_wpa();
+	test_wifi_off();
 	return test_summary();
 }

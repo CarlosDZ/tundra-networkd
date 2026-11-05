@@ -24,8 +24,8 @@ static const char *alerts;
 static int status(struct core_iface *ci, const struct profile *p, int conn,
                   const char *addr, const char *unmanaged, const char *want) {
 	char out[512];
-	struct iface_view v = {ci,        p,    conn,     addr,
-	                       unmanaged, kept, override, alerts};
+	struct iface_view v = {ci,   p,        conn,   addr, unmanaged,
+	                       kept, override, alerts, 0};
 	return proto_status(&v, out, sizeof(out)) >= 0 && strcmp(out, want) == 0;
 }
 
@@ -81,11 +81,17 @@ int main(void) {
 	             "iface enp8s0 state idle profile - address - trusted - "
 	             "override - alert -"),
 	      "an idle interface");
-	CHECK(status(&ci, NULL, 0, NULL, "interfaces: line 2: unknown key wifi",
+	CHECK(status(&ci, NULL, 0, NULL, "interfaces: line 2: unknown key speed",
 	             "iface enp8s0 state unmanaged profile - address - trusted - "
 	             "override - alert - "
-	             "-- interfaces: line 2: unknown key wifi"),
+	             "-- interfaces: line 2: unknown key speed"),
 	      "an unmanaged interface carries its error");
+	char out_off[512];
+	struct iface_view off = {.ci = &ci, .off = 1};
+	CHECK(proto_status(&off, out_off, sizeof(out_off)) >= 0 &&
+	          strcmp(out_off, "iface enp8s0 state off profile - address - "
+	                          "trusted - override - alert -") == 0,
+	      "an interface with wifi = no is off");
 	ci.st = C_BLOCKED;
 	ci.blocked = B_CONFIG;
 	CHECK(status(&ci, &p, 0, NULL, NULL,
@@ -157,5 +163,7 @@ int main(void) {
 	          strcmp(proto_connect_error(CONNECT_NO_MATCH),
 	                 "ERROR profile does not match") == 0,
 	      "connect results become replies");
+	CHECK(strcmp(proto_connect_error(CONNECT_OFF), "ERROR wifi is off") == 0,
+	      "CONNECT on an interface with wifi = no");
 	return test_summary();
 }

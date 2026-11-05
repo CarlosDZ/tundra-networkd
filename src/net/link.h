@@ -9,6 +9,7 @@ struct link_ev {
 	int gone;
 	int ifindex;
 	unsigned short arptype;
+	int up;
 	char name[IF_NAMESIZE];
 };
 

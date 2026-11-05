@@ -54,6 +54,7 @@ static int parse_link(struct nlmsghdr *nlh, struct link_ev *ev) {
 	ev->gone = nlh->nlmsg_type == RTM_DELLINK;
 	ev->ifindex = ifi->ifi_index;
 	ev->arptype = ifi->ifi_type;
+	ev->up = (ifi->ifi_flags & IFF_UP) != 0;
 	for (struct rtattr *rta = IFLA_RTA(ifi); RTA_OK(rta, len);
 	     rta = RTA_NEXT(rta, len)) {
 		if (rta->rta_type != IFLA_IFNAME)

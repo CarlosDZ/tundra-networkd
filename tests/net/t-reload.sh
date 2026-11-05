@@ -53,7 +53,7 @@ check "PROFILES shows the error" sh -c "$TOOLS/ctl '$SOCK' PROFILES | grep -q '^
 check "the profile cannot be connected again" reply_is "ERROR profile has errors" CONNECT casa
 
 cable_profile casa "$IF" "10.0.0.9"
-ifaces "wifi = yes"
+ifaces "metric = x"
 check "RELOAD with an error in interfaces" reply_is "OK" RELOAD
 check "the connection is kept too" untouched 2 "$pid"
 expect_log "$IF: interfaces has errors, keeping the previous configuration" 1 "and says so"
@@ -77,6 +77,11 @@ eventually "SIGHUP reloads: a deleted profile disconnects" 3 grep -q "^$pid USR1
 eventually "with event disconnected" 3 has_event "event disconnected $IF casa"
 check "and nothing takes its place" untouched 2 none
 check "STATUS shows it idle" status_has "iface $IF state idle profile - address - trusted - override - alert -"
+
+ifaces "wifi = no"
+check "RELOAD with wifi on a cable" reply_is "OK" RELOAD
+check "leaves the cable unmanaged, with the reason" status_has "iface $IF state unmanaged profile - address - trusted - override - alert - -- interfaces: line 2: wifi on a wired interface"
+ifaces "metric = 300"
 
 cable_profile casa
 check "RELOAD with a new profile" reply_is "OK" RELOAD

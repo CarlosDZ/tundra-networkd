@@ -23,6 +23,9 @@
 #define STATIC_FAIL (-1)
 #define STATIC_USAGE (-2)
 #define ACCEPTS_MAX 8
+#define LINK_PHYSICAL 1
+#define LINK_WIRELESS 2
+#define LINK_UP 4
 
 enum conn_state {
 	C_IDLE,
@@ -36,7 +39,8 @@ enum conn_state {
 };
 
 enum sensor_state { S_OFF, S_RUNNING, S_STOPPING, S_BACKOFF };
-enum child_kind { K_DHCPC, K_SENSOR, K_PROBE };
+enum wpa_state { W_OFF, W_RUNNING, W_STOPPING, W_BACKOFF };
+enum child_kind { K_DHCPC, K_SENSOR, K_PROBE, K_WPA };
 enum probe_result { PROBE_NONE, PROBE_FREE, PROBE_TAKEN };
 enum block_reason { B_NONE, B_CONFIG, B_EXITED, B_ALERT, B_TAKEN };
 
@@ -49,6 +53,8 @@ struct core_iface {
 	char name[IF_NAMESIZE];
 	int present;
 	int physical;
+	int wireless;
+	int up;
 	enum conn_state st;
 	char profile[PROFILE_NAME_MAX + 1];
 	char pending[PROFILE_NAME_MAX + 1];
@@ -80,6 +86,11 @@ struct core_iface {
 	int dispute;
 	unsigned int override;
 	unsigned int stop_id;
+	enum wpa_state wst;
+	unsigned int w_backoff_ms;
+	uint64_t w_started_at;
+	uint64_t w_retry_at;
+	uint64_t w_stop_at;
 };
 
 struct core {
@@ -95,6 +106,8 @@ enum act_type {
 	A_SPAWN_DHCPC,
 	A_SPAWN_SENSOR,
 	A_SPAWN_PROBE,
+	A_SPAWN_WPA,
+	A_LINK_DOWN,
 	A_STATIC_APPLY,
 	A_STATIC_REMOVE,
 	A_SIGNAL,
@@ -138,12 +151,13 @@ enum connect_result {
 	CONNECT_UNMANAGED,
 	CONNECT_NO_IFACE,
 	CONNECT_BLOCKED,
-	CONNECT_ALERT_PENDING
+	CONNECT_ALERT_PENDING,
+	CONNECT_OFF
 };
 
 void core_init(struct core *c, const struct config *cfg);
-void core_link(struct core *c, const char *ifname, int physical, uint64_t now,
-               struct actions *out);
+void core_link(struct core *c, const char *ifname, unsigned int flags,
+               uint64_t now, struct actions *out);
 void core_link_gone(struct core *c, const char *ifname, uint64_t now,
                     struct actions *out);
 void core_child_exit(struct core *c, const char *ifname, int status,
@@ -165,6 +179,8 @@ void core_probe_exit(struct core *c, const char *ifname, int status,
                      uint64_t now, struct actions *out);
 void core_static_result(struct core *c, const char *ifname, int rc,
                         uint64_t now, struct actions *out);
+void core_wpa_exit(struct core *c, const char *ifname, int status, uint64_t now,
+                   struct actions *out);
 void core_stop(struct core *c, const char *ifname, int level, unsigned int id,
                uint64_t now, struct actions *out);
 void core_note_alert(struct core *c, const char *ifname, int level,
@@ -179,6 +195,7 @@ void core_reload(struct core *c, const struct config *cfg, uint64_t now,
 int core_done(const struct core *c);
 uint64_t core_next_deadline(const struct core *c);
 const char *core_unmanaged(const struct core *c, const char *ifname);
+int core_wifi_off(const struct core *c, const char *ifname);
 const struct core_iface *core_find(const struct core *c, const char *ifname);
 
 #endif

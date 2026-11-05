@@ -5,5 +5,6 @@
 
 int static_apply(const struct action *a);
 int static_remove(const struct action *a);
+int static_link_down(const struct action *a);
 
 #endif

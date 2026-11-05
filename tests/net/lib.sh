@@ -355,24 +355,11 @@ wifi_setup() {
 		--pid-file="$WORK/wdnsmasq.pid"
 }
 
-hwsim_unload() {
-	n=50
-	_pid=
-	while lsmod | grep -q '^mac80211_hwsim '; do
-		[ "$n" -gt 0 ] || return 1
-		if [ -z "$_pid" ] || ! kill -0 "$_pid" 2>/dev/null; then
-			modprobe -r mac80211_hwsim >/dev/null 2>&1 </dev/null &
-			_pid=$!
-		fi
-		sleep 0.1
-		n=$((n - 1))
-	done
-}
-
+# The module stays loaded: reloading it can leave /sys/devices/virtual/
+# mac80211_hwsim behind, and then no radio can be created until a reboot.
 wifi_teardown() {
 	kill_ns "$WNS"
 	rm -f "$LEASES/$WIF".lease "$LEASES/$WIF"-*.lease
-	hwsim_unload
 }
 
 start_ap() {
@@ -425,7 +412,7 @@ teardown_net() {
 	stop_dnsmasq
 	kill_ns "$NS"
 	kill_ns "$EVIL"
-	wifi_teardown || not_ok "mac80211_hwsim unloads"
+	wifi_teardown
 	ip link del "${IF}p" 2>/dev/null
 	ip link del "${IF2}p" 2>/dev/null
 	ip link del "${EVIF}p" 2>/dev/null

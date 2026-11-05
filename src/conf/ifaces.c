@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define IFACE_KEYS 4
+
 static void set_error(char *dst, int line, const char *fmt, va_list ap) {
 	char msg[CONF_ERR_MAX - 16];
 	vsnprintf(msg, sizeof(msg), fmt, ap);
@@ -64,9 +66,10 @@ static int valid_table(const char *s) {
 
 static void apply_item(struct iface_conf *c, const struct gr_item *it,
                        int *seen) {
-	static const char *const names[] = {"metric", "table", "carrier-grace"};
+	static const char *const names[] = {"metric", "table", "carrier-grace",
+	                                    "wifi"};
 	int k = -1;
-	for (int i = 0; i < 3; i++)
+	for (int i = 0; i < IFACE_KEYS; i++)
 		if (strcmp(it->key, names[i]) == 0)
 			k = i;
 
@@ -100,13 +103,21 @@ static void apply_item(struct iface_conf *c, const struct gr_item *it,
 			iface_fail(c, it->line, "invalid carrier-grace: %s", it->value);
 		c->has_grace = 1;
 		break;
+	case 3:
+		if (strcmp(it->value, "yes") != 0 && strcmp(it->value, "no") != 0)
+			iface_fail(c, it->line, "invalid wifi: %s", it->value);
+		c->wifi = strcmp(it->value, "no") != 0;
+		c->has_wifi = 1;
+		snprintf(c->wired_error, sizeof(c->wired_error),
+		         "line %d: wifi on a wired interface", it->line);
+		break;
 	}
 }
 
 int ifaces_parse(struct ifaces *f, const char *text, size_t len) {
 	static struct grammar g;
 	int slot[GR_BLOCKS_MAX];
-	int seen[IFACES_MAX][3];
+	int seen[IFACES_MAX][IFACE_KEYS];
 
 	memset(f, 0, sizeof(*f));
 	memset(seen, 0, sizeof(seen));

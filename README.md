@@ -50,7 +50,14 @@ enp8s0 {
 	table = casa.cable
 	carrier-grace = 3000
 }
+wlp3s0 {
+	wifi = no
+}
 ```
+
+`wifi = no` turns the WiFi of that interface off: no `wpa_supplicant`, the
+interface is kept down and `STATUS` shows it `off`. On a wired interface the key
+is an error of its block.
 
 DNS goes to `/run/tundra/network/resolv.conf` and nowhere else: link
 `/etc/resolv.conf` to it to follow the active connections, ordered by metric,
@@ -69,6 +76,11 @@ three servers at most.
   that holds it; only a `CONNECT` tries again.
 - **Sensor**: every connection with an address runs `tundra-blueice-arp watch`
   on it, and again when the address or the gateway change.
+- **WiFi**: every wireless interface (one with `phy80211`) runs its own
+  `wpa_supplicant -i <if> -D nl80211`, with a minimal configuration in
+  `/run/tundra/network/wpa/`, driven through its control socket. Its output
+  goes to the log as `wpa[<if>]: …`. If it exits unasked, it is relaunched with
+  backoff, 1 s to 60 s.
 
 | tundra-dhcpc exits with | tundra-networkd |
 |-------------------------|-----------------|
@@ -130,7 +142,8 @@ ALERT 7 casa alert 111/8 stop by tundra-blueice-arp on enp8s0 ts 1762171512.347 
 ```
 
 States: `idle`, `connecting`, `connected`, `stopping`, `retrying`, `waiting`,
-`unmanaged` and `blocked`, with `reason config`, `exited`, `alert` or `taken`.
+`unmanaged`, `off` and `blocked`, with `reason config`, `exited`, `alert` or
+`taken`.
 
 ## Exit status
 
@@ -182,10 +195,10 @@ make check
   `../tundra-blueice-arp/build/test/` (or `BIARP_REAL`). The others use fakes
   built from `tests/tools/`. `tundra-ip` is taken from `/usr/local/bin` (or
   `TIP_REAL`).
-- The WiFi scenarios load `mac80211_hwsim` and create three radios inside the
-  test namespaces, out of reach of any wireless manager on the host. They need
-  `hostapd`, `iw`, `wpa_cli` and `wpa_supplicant` (`/usr/bin/wpa_supplicant`,
-  or `WPA_REAL`).
+- The WiFi scenarios create three `mac80211_hwsim` radios inside the test
+  namespaces, out of reach of any wireless manager on the host, and leave the
+  module loaded without radios. They need `hostapd`, `iw`, `wpa_cli` and
+  `wpa_supplicant` (`/usr/bin/wpa_supplicant`, or `WPA_REAL`).
 
 ## Currently unsupported
 

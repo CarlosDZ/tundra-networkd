@@ -17,6 +17,9 @@ struct iface_conf {
 	char table[TABLE_MAX + 1];
 	int has_grace;
 	unsigned int grace_ms;
+	int has_wifi;
+	int wifi;
+	char wired_error[CONF_ERR_MAX];
 	int valid;
 	char error[CONF_ERR_MAX];
 };

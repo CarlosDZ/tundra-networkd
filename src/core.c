@@ -69,6 +69,7 @@ static struct core_iface *find_or_add(struct core *c, const char *ifname) {
 	added->name[len] = '\0';
 	added->backoff_ms = BACKOFF_MIN_MS;
 	added->s_backoff_ms = BACKOFF_MIN_MS;
+	added->w_backoff_ms = BACKOFF_MIN_MS;
 	return added;
 }
 
@@ -86,7 +87,20 @@ static int managed(const struct core *c, const struct core_iface *ci,
 	if (!c->cfg->ifaces.valid)
 		return 0;
 	*conf = ifaces_find(&c->cfg->ifaces, ci->name);
-	return !*conf || (*conf)->valid;
+	return !*conf || ((*conf)->valid && (ci->wireless || !(*conf)->has_wifi));
+}
+
+static const char *unmanaged_why(const struct core *c,
+                                 const struct iface_conf *conf) {
+	if (!conf)
+		return c->cfg->ifaces.error;
+	return conf->valid ? conf->wired_error : conf->error;
+}
+
+static int wifi_off(const struct core *c, const struct core_iface *ci) {
+	const struct iface_conf *conf;
+	return ci->wireless && managed(c, ci, &conf) && conf && conf->has_wifi &&
+	       !conf->wifi;
 }
 
 static int matches(const struct profile *p, const struct core_iface *ci) {
@@ -201,6 +215,46 @@ static void sensor_sync(struct core_iface *ci, uint64_t now,
 	}
 }
 
+static void wpa_stop(struct core_iface *ci, uint64_t now, struct actions *out) {
+	if (ci->wst == W_RUNNING) {
+		ci->wst = W_STOPPING;
+		ci->w_stop_at = now + STOP_TIMEOUT_MS;
+		child_signal(out, ci, K_WPA, SIGTERM);
+	} else if (ci->wst == W_BACKOFF) {
+		ci->wst = W_OFF;
+	}
+}
+
+/* An interface whose block turned invalid keeps its wpa_supplicant, as the
+ * connection keeps the previous configuration. */
+static void wpa_sync(struct core *c, struct core_iface *ci, uint64_t now,
+                     struct actions *out) {
+	const struct iface_conf *conf;
+	int live = !c->shutting_down && ci->present && ci->wireless;
+	if (live && !managed(c, ci, &conf))
+		return;
+	if (!live || wifi_off(c, ci)) {
+		wpa_stop(ci, now, out);
+		return;
+	}
+	if (ci->wst != W_OFF)
+		return;
+	struct action *a = push(out, A_SPAWN_WPA, ci);
+	if (!a)
+		return;
+	a->kind = K_WPA;
+	ci->wst = W_RUNNING;
+	ci->w_started_at = now;
+}
+
+static void keep_down(const struct core *c, const struct core_iface *ci,
+                      struct actions *out) {
+	if (!ci->present || !ci->up || !wifi_off(c, ci))
+		return;
+	log_msg(out, ci, "wifi is off, bringing the interface down");
+	push(out, A_LINK_DOWN, ci);
+}
+
 static void push_static(const struct core_iface *ci, enum act_type type,
                         struct actions *out) {
 	struct action *a = push(out, type, ci);
@@ -288,7 +342,8 @@ static void try_autoconnect(struct core *c, struct core_iface *ci, uint64_t now,
                             struct actions *out) {
 	const struct iface_conf *conf;
 	if (c->shutting_down || !ci->present || ci->st != C_IDLE ||
-	    ci->manual_off || ci->blocked != B_NONE || !managed(c, ci, &conf))
+	    ci->manual_off || ci->blocked != B_NONE || !managed(c, ci, &conf) ||
+	    wifi_off(c, ci))
 		return;
 	const struct profile *p = autoselect(c, ci);
 	if (p) {
@@ -302,6 +357,8 @@ static void resume(struct core *c, struct core_iface *ci, uint64_t now,
 	const struct profile *p = profile_by_name(c, ci->profile);
 	const struct iface_conf *conf;
 	ci->st = C_IDLE;
+	if (wifi_off(c, ci))
+		return;
 	if (ci->kept[0] && !c->shutting_down) {
 		spawn_with(ci, &ci->conn, ci->has_conn_conf ? &ci->conn_conf : NULL,
 		           now, out);
@@ -330,7 +387,7 @@ static void after_stop(struct core *c, struct core_iface *ci, uint64_t now,
 	const struct profile *p =
 	    ci->pending[0] ? profile_by_name(c, ci->pending) : NULL;
 	ci->pending[0] = '\0';
-	if (p && matches(p, ci) && managed(c, ci, &conf))
+	if (p && matches(p, ci) && managed(c, ci, &conf) && !wifi_off(c, ci))
 		spawn(c, ci, p, now, out);
 	else
 		try_autoconnect(c, ci, now, out);
@@ -373,14 +430,16 @@ void core_init(struct core *c, const struct config *cfg) {
 	c->cfg = cfg;
 }
 
-void core_link(struct core *c, const char *ifname, int physical, uint64_t now,
-               struct actions *out) {
+void core_link(struct core *c, const char *ifname, unsigned int flags,
+               uint64_t now, struct actions *out) {
 	struct core_iface *ci = find_or_add(c, ifname);
 	if (!ci)
 		return;
 	int was = ci->present;
 	ci->present = 1;
-	ci->physical = physical;
+	ci->physical = (flags & LINK_PHYSICAL) != 0;
+	ci->wireless = (flags & LINK_WIRELESS) != 0;
+	ci->up = (flags & LINK_UP) != 0;
 
 	const struct iface_conf *conf;
 	if (!was && !managed(c, ci, &conf)) {
@@ -388,8 +447,10 @@ void core_link(struct core *c, const char *ifname, int physical, uint64_t now,
 			log_msg(out, ci, "not managed: interfaces: %s",
 			        c->cfg->ifaces.error);
 		else
-			log_msg(out, ci, "not managed: %s", conf->error);
+			log_msg(out, ci, "not managed: %s", unmanaged_why(c, conf));
 	}
+	wpa_sync(c, ci, now, out);
+	keep_down(c, ci, out);
 	if (c->lockdown && ci->st == C_IDLE) {
 		ci->st = C_BLOCKED;
 		ci->blocked = B_ALERT;
@@ -407,6 +468,7 @@ void core_link_gone(struct core *c, const char *ifname, uint64_t now,
 	if (!ci)
 		return;
 	ci->present = 0;
+	wpa_sync(c, ci, now, out);
 	if (ci->st == C_STATIC) {
 		ci->st = C_WAIT_LINK;
 		ci->want_addr = 0;
@@ -507,6 +569,16 @@ void core_timer(struct core *c, uint64_t now, struct actions *out) {
 			log_msg(out, ci, "tundra-blueice-arp did not stop in %u s, killed",
 			        STOP_TIMEOUT_MS / 1000);
 		}
+		if (ci->wst == W_BACKOFF && now >= ci->w_retry_at) {
+			ci->wst = W_OFF;
+			wpa_sync(c, ci, now, out);
+		}
+		if (ci->wst == W_STOPPING && ci->w_stop_at && now >= ci->w_stop_at) {
+			ci->w_stop_at = 0;
+			child_signal(out, ci, K_WPA, SIGKILL);
+			log_msg(out, ci, "wpa_supplicant did not stop in %u s, killed",
+			        STOP_TIMEOUT_MS / 1000);
+		}
 	}
 }
 
@@ -524,6 +596,8 @@ enum connect_result core_connect(struct core *c, const char *profile,
 	const struct iface_conf *conf;
 	if (!managed(c, ci, &conf))
 		return CONNECT_UNMANAGED;
+	if (wifi_off(c, ci))
+		return CONNECT_OFF;
 	if (!matches(p, ci))
 		return CONNECT_NO_MATCH;
 	if (ci->blocked == B_CONFIG)
@@ -606,6 +680,7 @@ void core_shutdown(struct core *c, uint64_t now, struct actions *out) {
 		         ci->st == C_STATIC)
 			ci->st = C_IDLE;
 		sensor_stop(ci, now, out);
+		wpa_stop(ci, now, out);
 	}
 }
 
@@ -614,7 +689,8 @@ int core_done(const struct core *c) {
 		return 0;
 	for (int i = 0; i < c->n; i++)
 		if (c->ifs[i].st == C_RUNNING || c->ifs[i].st == C_STOPPING ||
-		    c->ifs[i].sst == S_RUNNING || c->ifs[i].sst == S_STOPPING)
+		    c->ifs[i].sst == S_RUNNING || c->ifs[i].sst == S_STOPPING ||
+		    c->ifs[i].wst == W_RUNNING || c->ifs[i].wst == W_STOPPING)
 			return 0;
 	return 1;
 }
@@ -636,6 +712,10 @@ uint64_t core_next_deadline(const struct core *c) {
 			earliest(&next, ci->s_retry_at);
 		else if (ci->sst == S_STOPPING)
 			earliest(&next, ci->s_stop_at);
+		if (ci->wst == W_BACKOFF)
+			earliest(&next, ci->w_retry_at);
+		else if (ci->wst == W_STOPPING)
+			earliest(&next, ci->w_stop_at);
 	}
 	return next;
 }
@@ -645,7 +725,12 @@ const char *core_unmanaged(const struct core *c, const char *ifname) {
 	const struct iface_conf *conf;
 	if (!ci || managed(c, ci, &conf))
 		return NULL;
-	return conf ? conf->error : c->cfg->ifaces.error;
+	return unmanaged_why(c, conf);
+}
+
+int core_wifi_off(const struct core *c, const char *ifname) {
+	const struct core_iface *ci = core_find(c, ifname);
+	return ci && wifi_off(c, ci);
 }
 
 static int same_but_dns(const struct profile *a, const struct profile *b) {
@@ -732,6 +817,24 @@ static void reload_iface(struct core *c, struct core_iface *ci, uint64_t now,
 	release(c, ci, now, out);
 }
 
+static void reload_wifi(struct core *c, struct core_iface *ci, uint64_t now,
+                        struct actions *out) {
+	if (wifi_off(c, ci) && has_child(ci)) {
+		log_msg(out, ci, "wifi is off, disconnecting");
+		ci->kept[0] = '\0';
+		ci->pending[0] = '\0';
+		end_conn(ci);
+		release(c, ci, now, out);
+	} else if (wifi_off(c, ci) &&
+	           (ci->st == C_BACKOFF || ci->st == C_WAIT_LINK ||
+	            (ci->st == C_BLOCKED && ci->blocked != B_ALERT))) {
+		ci->st = C_IDLE;
+		ci->blocked = B_NONE;
+	}
+	wpa_sync(c, ci, now, out);
+	keep_down(c, ci, out);
+}
+
 void core_reload(struct core *c, const struct config *cfg, uint64_t now,
                  struct actions *out) {
 	c->cfg = cfg;
@@ -739,6 +842,8 @@ void core_reload(struct core *c, const struct config *cfg, uint64_t now,
 		return;
 	for (int i = 0; i < c->n; i++)
 		reload_iface(c, &c->ifs[i], now, out);
+	for (int i = 0; i < c->n; i++)
+		reload_wifi(c, &c->ifs[i], now, out);
 	for (int i = 0; i < c->n; i++)
 		try_autoconnect(c, &c->ifs[i], now, out);
 }
@@ -835,7 +940,7 @@ int core_force(struct core *c, unsigned int id, const char *origin,
 		const struct profile *p =
 		    ci->profile[0] ? profile_by_name(c, ci->profile) : NULL;
 		const struct iface_conf *conf;
-		if (!p || !matches(p, ci) || !managed(c, ci, &conf))
+		if (!p || !matches(p, ci) || !managed(c, ci, &conf) || wifi_off(c, ci))
 			try_autoconnect(c, ci, now, out);
 		else if (!ci->present)
 			ci->st = C_WAIT_LINK;
@@ -1016,4 +1121,34 @@ void core_static_result(struct core *c, const char *ifname, int rc,
 		log_msg(out, ci, "could not apply the static address");
 		on_failure(c, ci, now, out);
 	}
+}
+
+void core_wpa_exit(struct core *c, const char *ifname, int status, uint64_t now,
+                   struct actions *out) {
+	struct core_iface *ci = find(c, ifname);
+	if (!ci || (ci->wst != W_RUNNING && ci->wst != W_STOPPING))
+		return;
+	if (ci->wst == W_STOPPING) {
+		ci->wst = W_OFF;
+		ci->w_stop_at = 0;
+		wpa_sync(c, ci, now, out);
+		return;
+	}
+	if (WIFSIGNALED(status))
+		log_msg(out, ci, "wpa_supplicant killed by signal %d",
+		        WTERMSIG(status));
+	else
+		log_msg(out, ci, "wpa_supplicant exited with %d", WEXITSTATUS(status));
+	if (!ci->present || c->shutting_down) {
+		ci->wst = W_OFF;
+		return;
+	}
+	if (now - ci->w_started_at >= STABLE_MS)
+		ci->w_backoff_ms = BACKOFF_MIN_MS;
+	ci->wst = W_BACKOFF;
+	ci->w_retry_at = now + ci->w_backoff_ms;
+	log_msg(out, ci, "relaunching wpa_supplicant in %u ms", ci->w_backoff_ms);
+	ci->w_backoff_ms *= 2;
+	if (ci->w_backoff_ms > BACKOFF_MAX_MS)
+		ci->w_backoff_ms = BACKOFF_MAX_MS;
 }
