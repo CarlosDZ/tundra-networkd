@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <linux/if_arp.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,6 +50,7 @@
 #define ALERTS_FILE_MAX (ALERTS_MAX * REPLY_MAX)
 #define WPA_DIR TUNDRA_NETWORKD_RUN_DIR "/wpa"
 #define WPA_EVENT_MAX 4096
+#define WPA_CMD_MAX (WPA_VAR_MAX + 32)
 
 struct child {
 	int used;
@@ -65,6 +67,20 @@ struct child {
 	char line[OUT_LINE_MAX];
 	size_t len;
 	struct wpa_conn wpa;
+};
+
+struct wpa_net {
+	char name[PROFILE_NAME_MAX + 1];
+	int id;
+	uint64_t hash;
+	int priority;
+	int enabled;
+};
+
+struct wpa_table {
+	struct wpa_net items[PROFILES_MAX];
+	int n;
+	int disconnected;
 };
 
 struct conn_view {
@@ -86,6 +102,7 @@ struct daemon {
 	struct server srv;
 	struct conn_view view[CORE_IFACES];
 	struct alert_store alerts;
+	struct wpa_table wnets[CORE_IFACES];
 	int dirty;
 	int dns_written;
 	char dns[RESOLV_TEXT_MAX];
@@ -471,7 +488,149 @@ static void wpa_detach(struct daemon *d, struct child *k) {
 	wpa_close(&k->wpa);
 }
 
+static struct wpa_table *wpa_table_of(struct daemon *d, const char *ifname) {
+	const struct core_iface *ci = core_find(&d->core, ifname);
+	return ci ? &d->wnets[ci - d->core.ifs] : NULL;
+}
+
+static int wpa_vcmd(struct child *k, char *reply, size_t size, const char *fmt,
+                    va_list ap) {
+	char cmd[WPA_CMD_MAX];
+	int n = vsnprintf(cmd, sizeof(cmd), fmt, ap);
+	if (n < 0 || (size_t)n >= sizeof(cmd) ||
+	    wpa_request(k->wpa.ctl, cmd, reply, size) < 0)
+		return -1;
+	return strncmp(reply, "FAIL", 4) == 0 ? -1 : 0;
+}
+
+__attribute__((format(printf, 4, 5))) static int
+wpa_cmd(struct child *k, char *reply, size_t size, const char *fmt, ...) {
+	va_list ap;
+	va_start(ap, fmt);
+	int r = wpa_vcmd(k, reply, size, fmt, ap);
+	va_end(ap);
+	return r;
+}
+
+__attribute__((format(printf, 2, 3))) static int wpa_ok(struct child *k,
+                                                        const char *fmt, ...) {
+	char reply[64];
+	va_list ap;
+	va_start(ap, fmt);
+	int r = wpa_vcmd(k, reply, sizeof(reply), fmt, ap);
+	va_end(ap);
+	return r == 0 && strcmp(reply, "OK\n") == 0;
+}
+
+static int var_name(const char *var) { return (int)strcspn(var, " "); }
+
+/* Adds the network and sets every variable; -1 leaves nothing behind. */
+static int wpa_add(struct child *k, const struct wifi_net *want,
+                   const struct wpa_network *w) {
+	char reply[64];
+	char *end;
+	if (wpa_cmd(k, reply, sizeof(reply), "ADD_NETWORK") < 0)
+		return -1;
+	long id = strtol(reply, &end, 10);
+	if (end == reply || *end != '\n' || id < 0 || id > 0xffff)
+		return -1;
+	for (int i = 0; i < w->n; i++) {
+		const char *var = w->vars[i];
+		if (wpa_ok(k, "SET_NETWORK %ld %s", id, var))
+			continue;
+		if (w->optional[i]) {
+			printf("networkd: %s: wpa_supplicant without %.*s, profile %s "
+			       "goes without it\n",
+			       k->ifname, var_name(var), var, want->p->name);
+			continue;
+		}
+		printf("networkd: %s: wpa_supplicant rejected %.*s of profile %s\n",
+		       k->ifname, var_name(var), var, want->p->name);
+		wpa_ok(k, "REMOVE_NETWORK %ld", id);
+		return -1;
+	}
+	if (!wpa_ok(k, "SET_NETWORK %ld priority %d", id, want->priority) ||
+	    (want->enabled && !wpa_ok(k, "ENABLE_NETWORK %ld", id))) {
+		wpa_ok(k, "REMOVE_NETWORK %ld", id);
+		return -1;
+	}
+	return (int)id;
+}
+
+static void wpa_sync_nets(struct daemon *d, struct child *k) {
+	static struct wifi_net want[PROFILES_MAX];
+	static struct wpa_network w;
+	struct wpa_table *t = wpa_table_of(d, k->ifname);
+	int disc;
+	if (!t || k->wpa.ctl < 0)
+		return;
+	int n = core_wifi_nets(&d->core, k->ifname, want, PROFILES_MAX, &disc);
+	if (disc && !t->disconnected && wpa_ok(k, "DISCONNECT")) {
+		t->disconnected = 1;
+		printf("networkd: %s: wpa_supplicant disconnected\n", k->ifname);
+	}
+
+	for (int j = 0; j < t->n;) {
+		struct wpa_net *have = &t->items[j];
+		int keep = 0;
+		for (int i = 0; i < n && !keep; i++)
+			if (strcmp(want[i].p->name, have->name) == 0) {
+				wpactl_network(want[i].p, &w);
+				keep = w.hash == have->hash;
+			}
+		if (keep) {
+			j++;
+			continue;
+		}
+		wpa_ok(k, "REMOVE_NETWORK %d", have->id);
+		printf("networkd: %s: profile %s removed from wpa_supplicant\n",
+		       k->ifname, have->name);
+		*have = t->items[--t->n];
+	}
+
+	for (int i = 0; i < n; i++) {
+		struct wpa_net *have = NULL;
+		for (int j = 0; j < t->n && !have; j++)
+			if (strcmp(t->items[j].name, want[i].p->name) == 0)
+				have = &t->items[j];
+		if (have) {
+			if (have->priority != want[i].priority &&
+			    wpa_ok(k, "SET_NETWORK %d priority %d", have->id,
+			           want[i].priority))
+				have->priority = want[i].priority;
+			if (have->enabled != want[i].enabled &&
+			    wpa_ok(k, "%s_NETWORK %d",
+			           want[i].enabled ? "ENABLE" : "DISABLE", have->id)) {
+				have->enabled = want[i].enabled;
+				printf("networkd: %s: profile %s %s\n", k->ifname, have->name,
+				       have->enabled ? "enabled" : "disabled");
+			}
+			continue;
+		}
+		wpactl_network(want[i].p, &w);
+		int id = t->n < PROFILES_MAX ? wpa_add(k, &want[i], &w) : -1;
+		if (id < 0)
+			continue;
+		have = &t->items[t->n++];
+		snprintf(have->name, sizeof(have->name), "%s", want[i].p->name);
+		have->id = id;
+		have->hash = w.hash;
+		have->priority = want[i].priority;
+		have->enabled = want[i].enabled;
+		printf("networkd: %s: profile %s added as network %d, priority %d, "
+		       "%s\n",
+		       k->ifname, have->name, id, have->priority,
+		       have->enabled ? "enabled" : "disabled");
+	}
+
+	if (!disc && t->disconnected && wpa_ok(k, "RECONNECT")) {
+		t->disconnected = 0;
+		printf("networkd: %s: wpa_supplicant reconnecting\n", k->ifname);
+	}
+}
+
 static void wpa_attach(struct daemon *d, struct child *k) {
+	struct wpa_table *t = wpa_table_of(d, k->ifname);
 	if (wpa_connect(WPA_DIR, k->ifname, &k->wpa) < 0) {
 		printf("networkd: %s: cannot attach to wpa_supplicant: %s\n", k->ifname,
 		       strerror(errno));
@@ -480,6 +639,11 @@ static void wpa_attach(struct daemon *d, struct child *k) {
 	}
 	watch_fd(d, k->wpa.mon, ((uint64_t)T_WPA << 32) | (uint64_t)(k - d->kids));
 	printf("networkd: %s: wpa_supplicant ready\n", k->ifname);
+	if (t)
+		memset(t, 0, sizeof(*t));
+	if (!wpa_ok(k, "SET sae_pwe 2"))
+		printf("networkd: %s: wpa_supplicant rejected sae_pwe\n", k->ifname);
+	wpa_sync_nets(d, k);
 }
 
 static void on_wpa_dir(struct daemon *d) {
@@ -525,6 +689,10 @@ static void execute(struct daemon *d, struct actions *acts) {
 			break;
 		case A_SPAWN_WPA:
 			spawn_wpa(d, a);
+			break;
+		case A_WPA_SYNC:
+			if ((k = running_child(d, a->iface, K_WPA)))
+				wpa_sync_nets(d, k);
 			break;
 		case A_LINK_DOWN:
 			if (static_link_down(a) < 0)

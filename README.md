@@ -81,6 +81,14 @@ three servers at most.
   `/run/tundra/network/wpa/`, driven through its control socket. Its output
   goes to the log as `wpa[<if>]: …`. If it exits unasked, it is relaunched with
   backoff, 1 s to 60 s.
+- **WiFi networks**: every valid profile with `ssid` for that interface (or
+  `interface = *`) is a network, with the profile name as `id_str`; the first
+  profile has the highest priority and `autoconnect = no` leaves it disabled.
+  `wpa3` is SAE with PMF required and OCV where `wpa_supplicant` has it,
+  `wpa2` is WPA-PSK with PMF when the access point offers it, both CCMP only.
+  `CONNECT` to a WiFi profile leaves only that network enabled; `DISCONNECT`
+  disconnects `wpa_supplicant` until the next `CONNECT`. A reload replaces only
+  the networks whose profile changed.
 
 | tundra-dhcpc exits with | tundra-networkd |
 |-------------------------|-----------------|
@@ -202,7 +210,7 @@ make check
 
 ## Currently unsupported
 
-- WiFi: profiles with `ssid` are loaded and validated, but never match.
+- WiFi: an association does not launch `tundra-dhcpc` yet.
 - IPv6.
 - Sandboxing directives in the unit and dropping privileges.
 - An event when another client answers an alert.

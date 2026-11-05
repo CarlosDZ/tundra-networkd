@@ -19,6 +19,30 @@ static int decoded(const char *in, const char *want, size_t want_len) {
 	       n == want_len && memcmp(out, want, n) == 0;
 }
 
+static struct wpa_network net;
+
+static struct profile wifi(const char *name, const char *ssid,
+                           enum security sec, const char *pass) {
+	struct profile p;
+	memset(&p, 0, sizeof(p));
+	snprintf(p.name, sizeof(p.name), "%s", name);
+	p.ssid_len = strlen(ssid);
+	memcpy(p.ssid, ssid, p.ssid_len);
+	p.has_ssid = 1;
+	p.security = sec;
+	snprintf(p.passphrase, sizeof(p.passphrase), "%s", pass);
+	return p;
+}
+
+static int vars_are(const char *const *want, int n) {
+	if (net.n != n)
+		return 0;
+	for (int i = 0; i < n; i++)
+		if (strcmp(net.vars[i], want[i]) != 0)
+			return 0;
+	return 1;
+}
+
 int main(void) {
 	CHECK(event("<3>CTRL-EVENT-CONNECTED - Connection to 02:00:00:00:01:00 "
 	            "completed [id=0 id_str=casa]") == 0 &&
@@ -79,5 +103,39 @@ int main(void) {
 	CHECK(strcmp(hex, "746e6420ff") == 0, "an SSID in hexadecimal");
 	wpactl_hex((const unsigned char *)"", 0, hex);
 	CHECK(hex[0] == '\0', "an empty SSID");
+	struct profile p = wifi("10-casa", "casa", SEC_WPA3, "correct \"horse\"");
+	wpactl_network(&p, &net);
+	static const char *const wpa3[] = {
+	    "ssid 63617361",
+	    "id_str \"10-casa\"",
+	    "key_mgmt SAE",
+	    "proto RSN",
+	    "pairwise CCMP",
+	    "ieee80211w 2",
+	    "sae_password 636f72726563742022686f72736522",
+	    "ocv 1"};
+	CHECK(vars_are(wpa3, 8), "wpa3: SAE, PMF required and the password in hex");
+	CHECK(net.optional[7] && !net.optional[4], "only ocv is optional");
+	uint64_t h = net.hash;
+	wpactl_network(&p, &net);
+	CHECK(net.hash == h, "the same profile, the same hash");
+	snprintf(p.passphrase, sizeof(p.passphrase), "another one");
+	wpactl_network(&p, &net);
+	CHECK(net.hash != h, "a new passphrase changes it");
+
+	p = wifi("20-cafe", "caf\xc3\xa9 1", SEC_WPA2, "correct horse");
+	wpactl_network(&p, &net);
+	static const char *const wpa2[] = {
+	    "ssid 636166c3a92031",  "id_str \"20-cafe\"",
+	    "key_mgmt WPA-PSK",     "proto RSN",
+	    "pairwise CCMP",        "ieee80211w 1",
+	    "psk \"correct horse\""};
+	CHECK(vars_are(wpa2, 7), "wpa2: WPA-PSK, optional PMF, quoted passphrase");
+
+	p = wifi("30-bar", "bar", SEC_OPEN, "");
+	wpactl_network(&p, &net);
+	static const char *const open[] = {"ssid 626172", "id_str \"30-bar\"",
+	                                   "key_mgmt NONE"};
+	CHECK(vars_are(open, 3), "open: no key");
 	return test_summary();
 }

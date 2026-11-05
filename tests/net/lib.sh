@@ -150,6 +150,16 @@ apply {
 END
 }
 
+wifi_profile() {
+	{
+		printf 'match {\n\tinterface = %s\n\tssid = "%s"\n' "${6:-$WIF}" "$2"
+		printf '\tsecurity = %s\n}\napply {\n' "$3"
+		[ "$3" = open ] || printf '\tpassphrase = "%s"\n' "$4"
+		printf '\taddress = dhcp\n\tdns = lease\n\tautoconnect = %s\n' "${5:-yes}"
+		printf '\ttrusted = no\n}\n'
+	} | write_conf "$1.tnc"
+}
+
 physical() {
 	mkdir -p "$SYS/$1/device"
 }

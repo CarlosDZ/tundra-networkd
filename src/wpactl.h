@@ -4,9 +4,12 @@
 #include "profile.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define WPA_BSSID_MAX 18
 #define WPA_STATE_MAX 32
+#define WPA_VARS_MAX 8
+#define WPA_VAR_MAX (16 + 2 * PASSPHRASE_MAX + 1)
 
 enum wpa_event_type {
 	WPA_EV_OTHER,
@@ -33,10 +36,18 @@ struct wpa_status {
 	char id_str[PROFILE_NAME_MAX + 1];
 };
 
+struct wpa_network {
+	char vars[WPA_VARS_MAX][WPA_VAR_MAX];
+	int optional[WPA_VARS_MAX];
+	int n;
+	uint64_t hash;
+};
+
 int wpactl_event(const char *msg, size_t len, struct wpa_event *ev);
 int wpactl_status(const char *text, size_t len, struct wpa_status *st);
 int wpactl_decode(const char *in, size_t len, unsigned char *out, size_t max,
                   size_t *outlen);
 void wpactl_hex(const unsigned char *in, size_t len, char *out);
+void wpactl_network(const struct profile *p, struct wpa_network *w);
 
 #endif

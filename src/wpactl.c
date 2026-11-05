@@ -168,3 +168,52 @@ int wpactl_status(const char *text, size_t len, struct wpa_status *st) {
 	}
 	return st->state[0] ? 0 : -1;
 }
+
+static void add_var(struct wpa_network *w, int optional, const char *fmt,
+                    const char *value) {
+	if (w->n == WPA_VARS_MAX)
+		return;
+	snprintf(w->vars[w->n], WPA_VAR_MAX, fmt, value);
+	w->optional[w->n++] = optional;
+}
+
+/* The password goes in hex, like the SSID, so no byte needs quoting. The
+ * WPA2 passphrase stays quoted: psk takes hex only as the derived key. */
+void wpactl_network(const struct profile *p, struct wpa_network *w) {
+	char hex[2 * PASSPHRASE_MAX + 1];
+	memset(w, 0, sizeof(*w));
+	wpactl_hex(p->ssid, p->ssid_len, hex);
+	add_var(w, 0, "ssid %s", hex);
+	add_var(w, 0, "id_str \"%s\"", p->name);
+	switch (p->security) {
+	case SEC_WPA3:
+		wpactl_hex((const unsigned char *)p->passphrase, strlen(p->passphrase),
+		           hex);
+		add_var(w, 0, "key_mgmt %s", "SAE");
+		add_var(w, 0, "proto %s", "RSN");
+		add_var(w, 0, "pairwise %s", "CCMP");
+		add_var(w, 0, "ieee80211w %s", "2");
+		add_var(w, 0, "sae_password %s", hex);
+		add_var(w, 1, "ocv %s", "1");
+		break;
+	case SEC_WPA2:
+		add_var(w, 0, "key_mgmt %s", "WPA-PSK");
+		add_var(w, 0, "proto %s", "RSN");
+		add_var(w, 0, "pairwise %s", "CCMP");
+		add_var(w, 0, "ieee80211w %s", "1");
+		add_var(w, 0, "psk \"%s\"", p->passphrase);
+		break;
+	case SEC_OPEN:
+	case SEC_NONE:
+		add_var(w, 0, "key_mgmt %s", "NONE");
+		break;
+	}
+	uint64_t h = 0xcbf29ce484222325ULL;
+	for (int i = 0; i < w->n; i++)
+		for (const char *c = w->vars[i];; c++) {
+			h = (h ^ (unsigned char)*c) * 0x100000001b3ULL;
+			if (!*c)
+				break;
+		}
+	w->hash = h;
+}

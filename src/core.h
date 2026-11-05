@@ -87,6 +87,7 @@ struct core_iface {
 	unsigned int override;
 	unsigned int stop_id;
 	enum wpa_state wst;
+	char wselect[PROFILE_NAME_MAX + 1];
 	unsigned int w_backoff_ms;
 	uint64_t w_started_at;
 	uint64_t w_retry_at;
@@ -107,6 +108,7 @@ enum act_type {
 	A_SPAWN_SENSOR,
 	A_SPAWN_PROBE,
 	A_SPAWN_WPA,
+	A_WPA_SYNC,
 	A_LINK_DOWN,
 	A_STATIC_APPLY,
 	A_STATIC_REMOVE,
@@ -141,6 +143,12 @@ struct action {
 struct actions {
 	struct action a[ACTIONS_MAX];
 	int n;
+};
+
+struct wifi_net {
+	const struct profile *p;
+	int priority;
+	int enabled;
 };
 
 enum connect_result {
@@ -196,6 +204,8 @@ int core_done(const struct core *c);
 uint64_t core_next_deadline(const struct core *c);
 const char *core_unmanaged(const struct core *c, const char *ifname);
 int core_wifi_off(const struct core *c, const char *ifname);
+int core_wifi_nets(const struct core *c, const char *ifname,
+                   struct wifi_net *out, int max, int *disconnected);
 const struct core_iface *core_find(const struct core *c, const char *ifname);
 
 #endif

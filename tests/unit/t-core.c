@@ -1041,6 +1041,98 @@ static void test_wifi_off(void) {
 	      "an invalid block keeps wpa_supplicant running");
 }
 
+static void addw_to(struct config *cf, const char *name, const char *iface,
+                    const char *sec, int autoconnect) {
+	char buf[512];
+	snprintf(buf, sizeof(buf),
+	         "match {\n interface = %s\n ssid = \"%s\"\n security = %s\n}\n"
+	         "apply {\n%s address = dhcp\n dns = lease\n autoconnect = %s\n"
+	         " trusted = no\n}\n",
+	         iface, name, sec,
+	         strcmp(sec, "open") ? " passphrase = \"correct horse\"\n" : "",
+	         autoconnect ? "yes" : "no");
+	profile_parse(&cf->profiles[cf->n++], name, buf, strlen(buf), 0);
+}
+
+static int net_is(const struct wifi_net *w, const char *name, int priority,
+                  int enabled) {
+	return strcmp(w->p->name, name) == 0 && w->priority == priority &&
+	       w->enabled == enabled;
+}
+
+static void test_wifi_nets(void) {
+	static struct config next;
+	struct wifi_net nets[8];
+	int disc;
+	reset("");
+	addw_to(&cfg, "10-casa", "wl0", "wpa3", 1);
+	addw_to(&cfg, "20-cafe", "wl0", "open", 0);
+	add("25-cable", "wl0", MANUAL);
+	addw_to(&cfg, "30-todas", "*", "wpa2", 1);
+	addw_to(&cfg, "40-otra", "wl1", "open", 1);
+	CHECK(cfg.profiles[0].valid && cfg.profiles[1].valid &&
+	          cfg.profiles[3].valid,
+	      "WiFi profiles for the tests");
+	core_link(&c, "wl0", WL, 0, &out);
+	int n = core_wifi_nets(&c, "wl0", nets, 8, &disc);
+	CHECK(n == 3 && net_is(&nets[0], "10-casa", 3, 1) &&
+	          net_is(&nets[1], "20-cafe", 2, 0) &&
+	          net_is(&nets[2], "30-todas", 1, 1) && !disc,
+	      "the WiFi profiles of the interface, the first with the highest "
+	      "priority and autoconnect = no disabled");
+	core_link(&c, "tnd0", LINK_PHYSICAL, 0, &out);
+	CHECK(core_wifi_nets(&c, "tnd0", nets, 8, &disc) == 0,
+	      "a cable has no networks");
+	CHECK(core_wifi_nets(&c, "wl0", nets, 2, &disc) == 2,
+	      "the list stops at the room given");
+
+	out.n = 0;
+	CHECK(core_connect(&c, "20-cafe", "wl0", 10, &out) == CONNECT_OK &&
+	          count(A_WPA_SYNC) == 1 && count(A_SPAWN_DHCPC) == 0,
+	      "CONNECT to a WiFi profile asks for a sync, not for dhcpc");
+	core_wifi_nets(&c, "wl0", nets, 8, &disc);
+	CHECK(!nets[0].enabled && nets[1].enabled && !nets[2].enabled,
+	      "and only that network stays enabled");
+	CHECK(core_connect(&c, "40-otra", "wl0", 10, &out) == CONNECT_NO_MATCH,
+	      "a WiFi profile of another interface does not match");
+	CHECK(core_connect(&c, "10-casa", "tnd0", 10, &out) == CONNECT_NO_MATCH,
+	      "nor does one on a cable");
+
+	out.n = 0;
+	core_disconnect(&c, "wl0", 20, &out);
+	core_wifi_nets(&c, "wl0", nets, 8, &disc);
+	CHECK(count(A_WPA_SYNC) == 1 && disc && nets[0].enabled && !nets[1].enabled,
+	      "DISCONNECT disconnects wpa_supplicant and drops the selection");
+	out.n = 0;
+	core_connect(&c, "10-casa", "wl0", 30, &out);
+	core_wifi_nets(&c, "wl0", nets, 8, &disc);
+	CHECK(count(A_WPA_SYNC) == 1 && !disc && nets[0].enabled &&
+	          !nets[2].enabled,
+	      "CONNECT reconnects it");
+
+	memset(&next, 0, sizeof(next));
+	ifaces_parse(&next.ifaces, "", 0);
+	addw_to(&next, "20-cafe", "wl0", "open", 0);
+	addw_to(&next, "30-todas", "*", "wpa2", 1);
+	out.n = 0;
+	core_reload(&c, &next, 40, &out);
+	n = core_wifi_nets(&c, "wl0", nets, 8, &disc);
+	CHECK(count(A_WPA_SYNC) == 1 && n == 2 &&
+	          core_find(&c, "wl0")->wselect[0] == '\0' &&
+	          net_is(&nets[0], "20-cafe", 2, 0) &&
+	          net_is(&nets[1], "30-todas", 1, 1),
+	      "a reload asks for a sync and drops a selection whose profile is "
+	      "gone");
+
+	core_link(&c, "wl1", WL, 50, &out);
+	core_wpa_exit(&c, "wl1", EXITED(1), 60, &out);
+	out.n = 0;
+	core_connect(&c, "30-todas", "wl1", 70, &out);
+	CHECK(count(A_WPA_SYNC) == 0 &&
+	          strcmp(core_find(&c, "wl1")->wselect, "30-todas") == 0,
+	      "without wpa_supplicant the selection waits for the next one");
+}
+
 int main(void) {
 	test_autoconnect();
 	test_managed();
@@ -1057,5 +1149,6 @@ int main(void) {
 	test_static();
 	test_wpa();
 	test_wifi_off();
+	test_wifi_nets();
 	return test_summary();
 }

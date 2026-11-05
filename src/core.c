@@ -103,6 +103,16 @@ static int wifi_off(const struct core *c, const struct core_iface *ci) {
 	       !conf->wifi;
 }
 
+static int wifi_matches(const struct profile *p, const struct core_iface *ci) {
+	return p->valid && p->has_ssid && ci->wireless &&
+	       (p->any_interface || strcmp(p->interface, ci->name) == 0);
+}
+
+static void wpa_resync(const struct core_iface *ci, struct actions *out) {
+	if (ci->wst == W_RUNNING)
+		push(out, A_WPA_SYNC, ci);
+}
+
 static int matches(const struct profile *p, const struct core_iface *ci) {
 	if (!p->valid || p->has_ssid)
 		return 0;
@@ -598,6 +608,14 @@ enum connect_result core_connect(struct core *c, const char *profile,
 		return CONNECT_UNMANAGED;
 	if (wifi_off(c, ci))
 		return CONNECT_OFF;
+	if (p->has_ssid) {
+		if (!wifi_matches(p, ci))
+			return CONNECT_NO_MATCH;
+		ci->manual_off = 0;
+		snprintf(ci->wselect, sizeof(ci->wselect), "%s", p->name);
+		wpa_resync(ci, out);
+		return CONNECT_OK;
+	}
 	if (!matches(p, ci))
 		return CONNECT_NO_MATCH;
 	if (ci->blocked == B_CONFIG)
@@ -643,7 +661,10 @@ int core_disconnect(struct core *c, const char *ifname, uint64_t now,
 		return -1;
 	ci->manual_off = 1;
 	ci->pending[0] = '\0';
+	ci->wselect[0] = '\0';
 	end_conn(ci);
+	if (ci->wireless)
+		wpa_resync(ci, out);
 	switch (ci->st) {
 	case C_RUNNING:
 	case C_PROBING:
@@ -833,6 +854,12 @@ static void reload_wifi(struct core *c, struct core_iface *ci, uint64_t now,
 	}
 	wpa_sync(c, ci, now, out);
 	keep_down(c, ci, out);
+	const struct profile *sel =
+	    ci->wselect[0] ? profile_by_name(c, ci->wselect) : NULL;
+	if (ci->wselect[0] && !(sel && wifi_matches(sel, ci)))
+		ci->wselect[0] = '\0';
+	if (ci->wireless)
+		wpa_resync(ci, out);
 }
 
 void core_reload(struct core *c, const struct config *cfg, uint64_t now,
@@ -1151,4 +1178,26 @@ void core_wpa_exit(struct core *c, const char *ifname, int status, uint64_t now,
 	ci->w_backoff_ms *= 2;
 	if (ci->w_backoff_ms > BACKOFF_MAX_MS)
 		ci->w_backoff_ms = BACKOFF_MAX_MS;
+}
+
+int core_wifi_nets(const struct core *c, const char *ifname,
+                   struct wifi_net *out, int max, int *disconnected) {
+	const struct core_iface *ci = core_find(c, ifname);
+	int total = 0, n = 0;
+	*disconnected = ci && ci->manual_off;
+	if (!ci)
+		return 0;
+	for (int i = 0; i < c->cfg->n; i++)
+		total += wifi_matches(&c->cfg->profiles[i], ci);
+	for (int i = 0; i < c->cfg->n && n < max; i++) {
+		const struct profile *p = &c->cfg->profiles[i];
+		if (!wifi_matches(p, ci))
+			continue;
+		out[n].p = p;
+		out[n].priority = total - n;
+		out[n].enabled =
+		    ci->wselect[0] ? strcmp(p->name, ci->wselect) == 0 : p->autoconnect;
+		n++;
+	}
+	return n;
 }
