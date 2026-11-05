@@ -115,6 +115,11 @@ that child's pipe is discarded.
 
 - A `stop` releases the connection and leaves the interface stopped: only that
   one up to level 8, every interface from level 9.
+- On WiFi, a `stop` up to level 8 disables that network in `wpa_supplicant`
+  instead, and another network of the interface may connect; `force` goes back
+  to it. From level 9, or on a network without a profile, the interface stops
+  as a cable does, with `wpa_supplicant` disconnected. The pipe of
+  `wpa_supplicant` carries no alerts.
 - `ALERT-REPLY <id> force` reconnects, accepting that case up to that level for
   the whole connection; `disconnect` leaves the interface as after a
   `DISCONNECT`; `ack` closes a warning.

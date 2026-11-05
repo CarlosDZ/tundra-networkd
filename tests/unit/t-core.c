@@ -665,7 +665,7 @@ static void test_alerts(void) {
 	core_stop(&c, "tnd0", 8, 4, 100, &out);
 	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
 	out.n = 0;
-	CHECK(core_release_alert(&c, 4, &out) == 1 && st("tnd0") == C_IDLE &&
+	CHECK(core_release_alert(&c, 4, 0, &out) == 1 && st("tnd0") == C_IDLE &&
 	          ifc("tnd0")->manual_off && ifc("tnd0")->stop_id == 0,
 	      "disconnect leaves the interface as after DISCONNECT");
 	core_link(&c, "tnd0", 1, 300, &out);
@@ -687,7 +687,7 @@ static void test_alerts(void) {
 	core_stop(&c, "tnd0", 9, 6, 100, &out);
 	core_child_exit(&c, "tnd0", EXITED(0), 200, &out);
 	core_child_exit(&c, "tnd1", EXITED(0), 200, &out);
-	CHECK(core_release_alert(&c, 6, &out) >= 2 && st("tnd1") == C_IDLE &&
+	CHECK(core_release_alert(&c, 6, 0, &out) >= 2 && st("tnd1") == C_IDLE &&
 	          ifc("tnd1")->manual_off && !c.lockdown,
 	      "disconnect on level 9 releases every interface");
 
@@ -1209,6 +1209,115 @@ static void test_wifi_assoc(void) {
 	      "a dead wpa_supplicant ends the association");
 }
 
+static int net_enabled(const char *name, int *disc) {
+	struct wifi_net nets[8];
+	int n = core_wifi_nets(&c, "wl0", nets, 8, disc);
+	for (int i = 0; i < n; i++)
+		if (strcmp(nets[i].p->name, name) == 0)
+			return nets[i].enabled;
+	return -1;
+}
+
+static void test_wifi_alerts(void) {
+	uint32_t a = inet_addr("10.80.0.119"), gw = inet_addr("10.80.0.1");
+	int disc;
+	reset("");
+	addw_to(&cfg, "10-casa", "wl0", "wpa3", 1);
+	addw_to(&cfg, "20-cafe", "wl0", "open", 1);
+	add("90-any", "*", AUTO);
+	core_link(&c, "wl0", WL, 0, &out);
+	assoc("10-casa", "10-casa", "02:00:00:00:01:00", 10);
+	core_lease(&c, "wl0", a, gw, 20, &out);
+	CHECK(count(A_SPAWN_SENSOR) == 1, "the WiFi lease is watched");
+
+	out.n = 0;
+	core_stop(&c, "wl0", 8, 5, 30, &out);
+	CHECK(count(A_SIGNAL) == 2 && count(A_WPA_SYNC) == 1 &&
+	          logged("network of profile 10-casa disabled by an alert of "
+	                 "level 8"),
+	      "a stop on WiFi releases the connection and asks for a sync");
+	CHECK(net_enabled("10-casa", &disc) == 0 &&
+	          net_enabled("20-cafe", &disc) == 1 && !disc,
+	      "that network is disabled, the others stay");
+	out.n = 0;
+	core_child_exit(&c, "wl0", EXITED(0), 40, &out);
+	core_sensor_exit(&c, "wl0", EXITED(0), NULL, 40, &out);
+	CHECK(st("wl0") == C_IDLE, "and the interface is not blocked");
+	CHECK(core_connect(&c, "10-casa", "wl0", 45, &out) == CONNECT_ALERT_PENDING,
+	      "CONNECT to the stopped network waits for the answer");
+	assoc("20-cafe", "20-cafe", "02:00:00:00:03:00", 50);
+	CHECK(find_act(A_SPAWN_DHCPC) &&
+	          strcmp(find_act(A_SPAWN_DHCPC)->profile, "20-cafe") == 0,
+	      "another network of the interface connects");
+
+	out.n = 0;
+	CHECK(core_force(&c, 5, "wl0", "D", 8, 60, &out) == 1 &&
+	          count(A_WPA_SYNC) == 1 && logged("back to profile 10-casa"),
+	      "force goes back to that network");
+	CHECK(net_enabled("10-casa", &disc) == 1 &&
+	          net_enabled("20-cafe", &disc) == 0,
+	      "selecting it");
+	assoc("10-casa", "10-casa", "02:00:00:00:01:00", 70);
+	out.n = 0;
+	core_child_exit(&c, "wl0", EXITED(0), 80, &out);
+	core_lease(&c, "wl0", a, gw, 90, &out);
+	CHECK(find_act(A_SPAWN_DHCPC) && find_act(A_SPAWN_SENSOR) &&
+	          strcmp(find_act(A_SPAWN_SENSOR)->accept, "D/8") == 0 &&
+	          core_find(&c, "wl0")->override == 5,
+	      "with the case accepted and the connection untrusted");
+
+	out.n = 0;
+	core_stop(&c, "wl0", 8, 6, 100, &out);
+	core_child_exit(&c, "wl0", EXITED(0), 110, &out);
+	out.n = 0;
+	CHECK(core_release_alert(&c, 6, 120, &out) == 1 && count(A_WPA_SYNC) >= 1,
+	      "disconnect answers a WiFi stop");
+	CHECK(net_enabled("10-casa", &disc) == 1 && disc,
+	      "as after a DISCONNECT: the network back, wpa_supplicant "
+	      "disconnected");
+
+	reset("");
+	addw_to(&cfg, "10-casa", "wl0", "wpa3", 1);
+	core_link(&c, "wl0", WL, 0, &out);
+	assoc("10-casa", "10-casa", "02:00:00:00:01:00", 10);
+	out.n = 0;
+	core_stop(&c, "wl0", 9, 7, 20, &out);
+	net_enabled("10-casa", &disc);
+	CHECK(disc && count(A_WPA_SYNC) == 1 && logged("stopped by an alert"),
+	      "level 9 stops the whole interface and disconnects wpa_supplicant");
+	core_child_exit(&c, "wl0", EXITED(0), 30, &out);
+	assoc("10-casa", "10-casa", "02:00:00:00:01:00", 40);
+	CHECK(st("wl0") == C_BLOCKED && count(A_SPAWN_DHCPC) == 0,
+	      "an association during it starts nothing");
+	out.n = 0;
+	core_force(&c, 7, "wl0", "D", 9, 50, &out);
+	net_enabled("10-casa", &disc);
+	CHECK(!disc && st("wl0") == C_IDLE && count(A_WPA_SYNC) == 1,
+	      "force unblocks it and reconnects wpa_supplicant");
+	assoc("10-casa", "10-casa", "02:00:00:00:01:00", 60);
+	core_lease(&c, "wl0", a, gw, 70, &out);
+	CHECK(find_act(A_SPAWN_SENSOR) &&
+	          strcmp(find_act(A_SPAWN_SENSOR)->accept, "D/9") == 0,
+	      "and the next association carries the accepted case");
+
+	reset("");
+	addw_to(&cfg, "10-casa", "wl0", "wpa3", 1);
+	core_restore_stop(&c, "wl0", "10-casa", 8, 9);
+	core_link(&c, "wl0", WL, 0, &out);
+	CHECK(st("wl0") == C_IDLE && net_enabled("10-casa", &disc) == 0,
+	      "a restored WiFi stop disables the network, not the interface");
+
+	reset("");
+	add("90-any", "*", AUTO);
+	core_link(&c, "wl0", WL, 0, &out);
+	assoc("", "hotel", "02:00:00:00:04:00", 10);
+	out.n = 0;
+	core_stop(&c, "wl0", 8, 8, 20, &out);
+	net_enabled("x", &disc);
+	CHECK(logged("stopped by an alert of level 8") && disc,
+	      "a network without profile stops the whole interface");
+}
+
 int main(void) {
 	test_autoconnect();
 	test_managed();
@@ -1227,5 +1336,6 @@ int main(void) {
 	test_wifi_off();
 	test_wifi_nets();
 	test_wifi_assoc();
+	test_wifi_alerts();
 	return test_summary();
 }

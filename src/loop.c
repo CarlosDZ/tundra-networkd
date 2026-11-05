@@ -1037,7 +1037,7 @@ static const char *do_reply(struct daemon *d, const struct cmd *cmd) {
 		core_force(&d->core, copy.id, copy.a.on, copy.a.kase, copy.a.level, now,
 		           &acts);
 	} else if (copy.a.action == AL_STOP && strcmp(opt, "disconnect") == 0) {
-		core_release_alert(&d->core, copy.id, &acts);
+		core_release_alert(&d->core, copy.id, now, &acts);
 	} else if (strcmp(opt, "disconnect") == 0) {
 		const struct core_iface *ci = core_find(&d->core, copy.a.on);
 		if (ci && ci->st != C_IDLE && strcmp(ci->profile, copy.profile) == 0)

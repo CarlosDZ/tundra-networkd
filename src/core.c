@@ -194,6 +194,58 @@ static int is_dispute(const char *kase) {
 	       strcmp(kase, "C") == 0 || strcmp(kase, "mac-addr") == 0;
 }
 
+static int wifi_stopped(const struct core_iface *ci, const char *profile) {
+	for (int i = 0; i < ci->nwstops; i++)
+		if (strcmp(ci->wstops[i].profile, profile) == 0)
+			return i;
+	return -1;
+}
+
+static void wifi_stop_add(struct core_iface *ci, const char *profile,
+                          unsigned int id) {
+	if (wifi_stopped(ci, profile) >= 0)
+		return;
+	if (ci->nwstops == WIFI_STOPS_MAX)
+		memmove(&ci->wstops[0], &ci->wstops[1],
+		        sizeof(ci->wstops[0]) * --ci->nwstops);
+	struct wifi_stop *w = &ci->wstops[ci->nwstops++];
+	snprintf(w->profile, sizeof(w->profile), "%s", profile);
+	w->id = id;
+}
+
+static int wifi_stop_take(struct core_iface *ci, unsigned int id,
+                          char profile[PROFILE_NAME_MAX + 1]) {
+	for (int i = 0; i < ci->nwstops; i++) {
+		if (ci->wstops[i].id != id)
+			continue;
+		memcpy(profile, ci->wstops[i].profile, PROFILE_NAME_MAX + 1);
+		ci->wstops[i] = ci->wstops[--ci->nwstops];
+		return 1;
+	}
+	return 0;
+}
+
+/* Starts a connection on WiFi; the one an alert was forced back to keeps
+ * what the answer accepted, whichever network came in between. */
+static void start_conn(struct core_iface *ci, const struct profile *p) {
+	end_conn(ci);
+	if (!ci->wforced[0] || strcmp(ci->wforced, p->name) != 0)
+		return;
+	if (ci->wf_kase[0]) {
+		add_accept(ci, ci->wf_kase, ci->wf_level);
+		if (is_dispute(ci->wf_kase))
+			ci->dispute = 1;
+	}
+	if (ci->wf_level >= TRUST_LEVEL)
+		ci->override = ci->wf_id;
+	ci->wforced[0] = '\0';
+}
+
+static int wifi_held(const struct core_iface *ci) {
+	return ci->manual_off || ci->alert_stop ||
+	       (ci->st == C_BLOCKED && ci->blocked == B_ALERT);
+}
+
 static void sensor_signal(struct actions *out, const struct core_iface *ci,
                           int sig) {
 	struct action *a = push(out, A_SIGNAL, ci);
@@ -635,6 +687,8 @@ enum connect_result core_connect(struct core *c, const char *profile,
 	if (p->has_ssid) {
 		if (!wifi_matches(p, ci))
 			return CONNECT_NO_MATCH;
+		if (wifi_stopped(ci, p->name) >= 0)
+			return CONNECT_ALERT_PENDING;
 		ci->manual_off = 0;
 		snprintf(ci->wselect, sizeof(ci->wselect), "%s", p->name);
 		wpa_resync(ci, out);
@@ -914,9 +968,25 @@ void core_lease(struct core *c, const char *ifname, uint32_t addr, uint32_t gw,
 		sensor_sync(ci, now, out);
 }
 
-static void stop_one(struct core *c, struct core_iface *ci, int level,
-                     unsigned int id, uint64_t now, struct actions *out) {
+/* On WiFi a stop up to level 8 disables that network only, so another one
+ * can connect; from 9, or without a network of its own, the interface stops
+ * as on a cable. Returns whether it was the network. */
+static int stop_one(struct core *c, struct core_iface *ci, int level,
+                    unsigned int id, uint64_t now, struct actions *out) {
+	const struct profile *p =
+	    ci->st != C_IDLE ? profile_by_name(c, ci->profile) : NULL;
 	ci->pending[0] = '\0';
+	if (ci->wireless && level < ALERT_ALL_LEVEL && p && p->has_ssid) {
+		wifi_stop_add(ci, p->name, id);
+		if (ci->wselect[0] && strcmp(ci->wselect, p->name) == 0)
+			ci->wselect[0] = '\0';
+		if (has_child(ci))
+			release(c, ci, now, out);
+		ci->want_addr = 0;
+		sensor_stop(ci, now, out);
+		wpa_resync(ci, out);
+		return 1;
+	}
 	if (level >= TRUST_LEVEL && ci->st != C_IDLE && !ci->override)
 		ci->override = id;
 	ci->stop_id = id;
@@ -931,6 +1001,9 @@ static void stop_one(struct core *c, struct core_iface *ci, int level,
 	}
 	ci->want_addr = 0;
 	sensor_stop(ci, now, out);
+	if (ci->wireless)
+		wpa_resync(ci, out);
+	return 0;
 }
 
 void core_stop(struct core *c, const char *ifname, int level, unsigned int id,
@@ -948,8 +1021,14 @@ void core_stop(struct core *c, const char *ifname, int level, unsigned int id,
 	struct core_iface *ci = find(c, ifname);
 	if (!ci)
 		return;
-	stop_one(c, ci, level, id, now, out);
-	log_msg(out, ci, "stopped by an alert of level %d", level);
+	char profile[PROFILE_NAME_MAX + 1];
+	snprintf(profile, sizeof(profile), "%s", ci->profile);
+	if (stop_one(c, ci, level, id, now, out))
+		log_msg(out, ci,
+		        "network of profile %s disabled by an alert of level %d",
+		        profile, level);
+	else
+		log_msg(out, ci, "stopped by an alert of level %d", level);
 }
 
 void core_note_alert(struct core *c, const char *ifname, int level,
@@ -968,9 +1047,36 @@ int core_force(struct core *c, unsigned int id, const char *origin,
 	}
 	for (int i = 0; i < c->n; i++) {
 		struct core_iface *ci = &c->ifs[i];
-		if (ci->stop_id != id)
+		char profile[PROFILE_NAME_MAX + 1];
+		int net = wifi_stop_take(ci, id, profile);
+		if (!net && ci->stop_id != id)
 			continue;
 		n++;
+		if (ci->wireless || net) {
+			if (!net) {
+				ci->stop_id = 0;
+				snprintf(profile, sizeof(profile), "%s", ci->profile);
+				ci->alert_stop = 0;
+				if (ci->st == C_BLOCKED && ci->blocked == B_ALERT) {
+					ci->st = C_IDLE;
+					ci->blocked = B_NONE;
+				}
+			} else {
+				memcpy(ci->wselect, profile, sizeof(ci->wselect));
+			}
+			memcpy(ci->wforced, profile, sizeof(ci->wforced));
+			snprintf(ci->wf_kase, sizeof(ci->wf_kase), "%s",
+			         strcmp(ci->name, origin) == 0 ? kase : "");
+			ci->wf_level = level;
+			ci->wf_id = id;
+			ci->manual_off = 0;
+			ci->s_fails = 0;
+			ci->s_backoff_ms = BACKOFF_MIN_MS;
+			wpa_resync(ci, out);
+			log_msg(out, ci, "alert %u forced, back to profile %s", id,
+			        profile);
+			continue;
+		}
 		ci->stop_id = 0;
 		if (strcmp(ci->name, origin) == 0) {
 			add_accept(ci, kase, level);
@@ -1002,7 +1108,8 @@ int core_force(struct core *c, unsigned int id, const char *origin,
 	return n;
 }
 
-int core_release_alert(struct core *c, unsigned int id, struct actions *out) {
+int core_release_alert(struct core *c, unsigned int id, uint64_t now,
+                       struct actions *out) {
 	int n = 0;
 	if (c->lockdown && c->lockdown_id == id) {
 		c->lockdown = 0;
@@ -1010,13 +1117,23 @@ int core_release_alert(struct core *c, unsigned int id, struct actions *out) {
 	}
 	for (int i = 0; i < c->n; i++) {
 		struct core_iface *ci = &c->ifs[i];
-		if (ci->stop_id != id)
+		char profile[PROFILE_NAME_MAX + 1];
+		int net = wifi_stop_take(ci, id, profile);
+		if (!net && ci->stop_id != id)
 			continue;
 		n++;
+		if (net) {
+			core_disconnect(c, ci->name, now, out);
+			log_msg(out, ci, "alert %u answered with disconnect", id);
+			continue;
+		}
 		end_conn(ci);
 		ci->stop_id = 0;
 		ci->manual_off = 1;
+		ci->wselect[0] = '\0';
 		ci->pending[0] = '\0';
+		if (ci->wireless)
+			wpa_resync(ci, out);
 		if (ci->st == C_STOPPING) {
 			ci->alert_stop = 0;
 		} else if (ci->st == C_BLOCKED && ci->blocked == B_ALERT) {
@@ -1037,6 +1154,11 @@ void core_restore_stop(struct core *c, const char *ifname, const char *profile,
 	struct core_iface *ci = find_or_add(c, ifname);
 	if (!ci)
 		return;
+	const struct profile *wp = profile_by_name(c, profile);
+	if (level < ALERT_ALL_LEVEL && wp && wp->has_ssid) {
+		wifi_stop_add(ci, profile, id);
+		return;
+	}
 	ci->st = C_BLOCKED;
 	ci->blocked = B_ALERT;
 	ci->stop_id = id;
@@ -1209,7 +1331,7 @@ int core_wifi_nets(const struct core *c, const char *ifname,
                    struct wifi_net *out, int max, int *disconnected) {
 	const struct core_iface *ci = core_find(c, ifname);
 	int total = 0, n = 0;
-	*disconnected = ci && ci->manual_off;
+	*disconnected = ci && wifi_held(ci);
 	if (!ci)
 		return 0;
 	for (int i = 0; i < c->cfg->n; i++)
@@ -1220,8 +1342,9 @@ int core_wifi_nets(const struct core *c, const char *ifname,
 			continue;
 		out[n].p = p;
 		out[n].priority = total - n;
-		out[n].enabled =
-		    ci->wselect[0] ? strcmp(p->name, ci->wselect) == 0 : p->autoconnect;
+		out[n].enabled = wifi_stopped(ci, p->name) < 0 &&
+		                 (ci->wselect[0] ? strcmp(p->name, ci->wselect) == 0
+		                                 : p->autoconnect);
 		n++;
 	}
 	return n;
@@ -1278,12 +1401,12 @@ void core_wifi_assoc(struct core *c, const char *ifname, const char *id_str,
 		        p->name);
 		snprintf(ci->pending, sizeof(ci->pending), "%s", p->name);
 		if (has_child(ci)) {
-			end_conn(ci);
+			start_conn(ci, p);
 			release(c, ci, now, out);
 		}
 		return;
 	}
-	end_conn(ci);
+	start_conn(ci, p);
 	ci->st = C_IDLE;
 	ci->blocked = B_NONE;
 	ci->backoff_ms = BACKOFF_MIN_MS;

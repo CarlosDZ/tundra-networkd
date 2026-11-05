@@ -23,6 +23,7 @@
 #define STATIC_FAIL (-1)
 #define STATIC_USAGE (-2)
 #define ACCEPTS_MAX 8
+#define WIFI_STOPS_MAX 8
 #define WIFI_GRACE_MS 3000
 #define BSSID_MAX 18
 #define LINK_PHYSICAL 1
@@ -49,6 +50,11 @@ enum block_reason { B_NONE, B_CONFIG, B_EXITED, B_ALERT, B_TAKEN };
 struct accept {
 	char kase[ALERT_TOKEN_MAX + 1];
 	int level;
+};
+
+struct wifi_stop {
+	char profile[PROFILE_NAME_MAX + 1];
+	unsigned int id;
 };
 
 struct core_iface {
@@ -96,6 +102,12 @@ struct core_iface {
 	unsigned char assid[SSID_MAX];
 	size_t assid_len;
 	char bssid[BSSID_MAX];
+	struct wifi_stop wstops[WIFI_STOPS_MAX];
+	int nwstops;
+	char wforced[PROFILE_NAME_MAX + 1];
+	char wf_kase[ALERT_TOKEN_MAX + 1];
+	int wf_level;
+	unsigned int wf_id;
 	unsigned int w_backoff_ms;
 	uint64_t w_started_at;
 	uint64_t w_retry_at;
@@ -207,7 +219,8 @@ void core_note_alert(struct core *c, const char *ifname, int level,
                      unsigned int id);
 int core_force(struct core *c, unsigned int id, const char *origin,
                const char *kase, int level, uint64_t now, struct actions *out);
-int core_release_alert(struct core *c, unsigned int id, struct actions *out);
+int core_release_alert(struct core *c, unsigned int id, uint64_t now,
+                       struct actions *out);
 void core_restore_stop(struct core *c, const char *ifname, const char *profile,
                        int level, unsigned int id);
 void core_reload(struct core *c, const struct config *cfg, uint64_t now,
