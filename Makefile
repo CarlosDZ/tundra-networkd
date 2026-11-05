@@ -91,12 +91,28 @@ FORCE:
 ## Installation
 
 PREFIX ?= /usr
+SYSCONFDIR ?= /etc
+UNITDIR ?= $(PREFIX)/lib/systemd/system
 DESTDIR ?=
+
+CONF_FILES = 000-template.tnc 999-dhcp.tnc
 
 install: $(TARGET)
 	install -Dm755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/$(TARGET)
 	install -Dm644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/$(TARGET)/LICENSE
+	install -Dm644 data/000-template.tnc \
+		$(DESTDIR)$(PREFIX)/share/tundra/network/000-template.tnc
+	install -d $(DESTDIR)$(UNITDIR)
+	sed 's|@BINDIR@|$(PREFIX)/bin|' data/tundra-networkd.service.in \
+		>$(DESTDIR)$(UNITDIR)/tundra-networkd.service
+	chmod 644 $(DESTDIR)$(UNITDIR)/tundra-networkd.service
+	for f in $(CONF_FILES); do \
+		[ -e $(DESTDIR)$(SYSCONFDIR)/tundra/network/$$f ] || \
+		install -Dm644 data/$$f $(DESTDIR)$(SYSCONFDIR)/tundra/network/$$f; \
+	done
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/$(TARGET)
 	rm -rf $(DESTDIR)$(PREFIX)/share/licenses/$(TARGET)
+	rm -f $(DESTDIR)$(PREFIX)/share/tundra/network/000-template.tnc
+	rm -f $(DESTDIR)$(UNITDIR)/tundra-networkd.service

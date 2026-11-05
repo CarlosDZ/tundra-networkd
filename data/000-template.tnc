@@ -1,0 +1,67 @@
+# tundra-networkd profile template. This file is never loaded: copy it to
+# /etc/tundra/network/<name>.tnc, uncomment what you need and run
+# "systemctl reload tundra-networkd". A profile that carries a passphrase
+# must be mode 0600, or it is rejected.
+#
+# Every key below is required unless it says otherwise. Text values (ssid,
+# passphrase) go between double quotes, with \", \\ and \xHH escapes; every
+# other value goes without quotes.
+#
+# match: when the profile applies.
+#
+#   interface  an interface name, or * for any wired interface with a device
+#   ssid       optional; makes the profile a WiFi one
+#   security   only with ssid: wpa3, wpa2 or open
+#
+# apply: what the connection does.
+#
+#   passphrase   only with wpa2 or wpa3. wpa2: 8 to 63 printable ASCII
+#   address      dhcp, or a fixed IPv4 with its prefix, e.g. 192.168.1.50/24
+#   gateway      optional, only with a fixed address, inside its network
+#   dns          lease (only with dhcp), 1 to 3 IPv4 separated by commas,
+#                or none
+#   autoconnect  yes: connect as soon as it matches. no: only on CONNECT
+#   trusted      yes or no. tundra-blueice can lower it after an alert
+#
+# Wired, DHCP, own DNS servers:
+#
+# match {
+# 	interface = enp8s0
+# }
+#
+# apply {
+# 	address = dhcp
+# 	dns = 9.9.9.9, 1.1.1.1
+# 	autoconnect = yes
+# 	trusted = yes
+# }
+#
+# Wired, fixed address:
+#
+# match {
+# 	interface = enp8s0
+# }
+#
+# apply {
+# 	address = 192.168.1.50/24
+# 	gateway = 192.168.1.1
+# 	dns = 192.168.1.1
+# 	autoconnect = yes
+# 	trusted = yes
+# }
+#
+# WiFi (not supported yet by tundra-networkd 0.1):
+#
+# match {
+# 	interface = wlp3s0
+# 	ssid = "casa"
+# 	security = wpa3
+# }
+#
+# apply {
+# 	passphrase = "correct horse battery staple"
+# 	address = dhcp
+# 	dns = lease
+# 	autoconnect = yes
+# 	trusted = yes
+# }

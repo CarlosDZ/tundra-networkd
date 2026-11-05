@@ -1,0 +1,13 @@
+# Fallback profile: DHCP on any wired interface that no other profile takes.
+# Files are read in lexicographic order, so a profile named below 999 wins.
+
+match {
+	interface = *
+}
+
+apply {
+	address = dhcp
+	dns = lease
+	autoconnect = yes
+	trusted = no
+}
