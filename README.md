@@ -182,6 +182,10 @@ make check
   `../tundra-blueice-arp/build/test/` (or `BIARP_REAL`). The others use fakes
   built from `tests/tools/`. `tundra-ip` is taken from `/usr/local/bin` (or
   `TIP_REAL`).
+- The WiFi scenarios load `mac80211_hwsim` and create three radios inside the
+  test namespaces, out of reach of any wireless manager on the host. They need
+  `hostapd`, `iw`, `wpa_cli` and `wpa_supplicant` (`/usr/bin/wpa_supplicant`,
+  or `WPA_REAL`).
 
 ## Currently unsupported
 

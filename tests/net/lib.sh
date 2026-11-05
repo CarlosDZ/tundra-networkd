@@ -26,6 +26,14 @@ BIARP_FAKE_DIR=$WORK/biarp
 BIARP_REAL=${BIARP_REAL:-$ROOT/../tundra-blueice-arp/build/test/tundra-blueice-arp}
 ARPSEND=${ARPSEND:-$ROOT/../tundra-blueice-arp/build/test/tools/arpsend}
 export DHCPC_FAKE_DIR DHCPC_REAL BIARP_FAKE_DIR BIARP_REAL
+WNS=tndap
+WIF=tndw0
+WAP1=tndap0
+WAP2=tndap1
+WBR=tndapbr
+WNET=10.80.0
+WPA_REAL=${WPA_REAL:-/usr/bin/wpa_supplicant}
+export WPA_REAL
 
 PASS=0
 FAIL=0
@@ -313,12 +321,111 @@ kill_ns() {
 	ip netns del "$1" 2>/dev/null
 }
 
+wifi_ready() {
+	for c in hostapd iw wpa_cli "$WPA_REAL"; do
+		command -v "$c" >/dev/null || return 1
+	done
+	modprobe -n mac80211_hwsim 2>/dev/null
+}
+
+# Radios made by netlink belong to the creator's netns and die with it. The
+# module's own start in the host netns and return there, where a wireless
+# manager can take them and block the module removal for good.
+wifi_radio() {
+	ip netns exec "$WNS" "$TOOLS/hwsim-radio" >/dev/null || return 1
+	ip -n "$WNS" link set wlan0 name "$1"
+}
+
+wifi_setup() {
+	modprobe mac80211_hwsim radios=0 || return 1
+	ip netns add "$WNS"
+	ip -n "$WNS" link set lo up
+	wifi_radio "$WAP1" || return 1
+	wifi_radio "$WAP2" || return 1
+	wifi_radio "$WIF" || return 1
+	_phy=$(ip netns exec "$WNS" cat "/sys/class/net/$WIF/phy80211/name") ||
+		return 1
+	ip netns exec "$WNS" iw phy "$_phy" set netns name "$NS" || return 1
+	ip -n "$WNS" link add "$WBR" type bridge
+	ip -n "$WNS" addr add "$WNET.1/24" dev "$WBR"
+	ip -n "$WNS" link set "$WBR" up
+	ip netns exec "$WNS" dnsmasq --interface="$WBR" --bind-interfaces \
+		--port=0 --no-ping --dhcp-range="$WNET.100,$WNET.150,2m" \
+		--dhcp-option=3,"$WNET.1" --dhcp-leasefile="$WORK/wleases" \
+		--pid-file="$WORK/wdnsmasq.pid"
+}
+
+hwsim_unload() {
+	n=50
+	_pid=
+	while lsmod | grep -q '^mac80211_hwsim '; do
+		[ "$n" -gt 0 ] || return 1
+		if [ -z "$_pid" ] || ! kill -0 "$_pid" 2>/dev/null; then
+			modprobe -r mac80211_hwsim >/dev/null 2>&1 </dev/null &
+			_pid=$!
+		fi
+		sleep 0.1
+		n=$((n - 1))
+	done
+}
+
+wifi_teardown() {
+	kill_ns "$WNS"
+	rm -f "$LEASES/$WIF".lease "$LEASES/$WIF"-*.lease
+	hwsim_unload
+}
+
+start_ap() {
+	_conf=$WORK/hostapd-$1.conf
+	{
+		echo "interface=$1"
+		echo "bridge=$WBR"
+		echo "driver=nl80211"
+		echo "ssid=$2"
+		echo "hw_mode=g"
+		echo "channel=${5:-1}"
+		case $3 in
+		wpa2)
+			echo "wpa=2"
+			echo "wpa_key_mgmt=WPA-PSK"
+			echo "rsn_pairwise=CCMP"
+			echo "wpa_passphrase=$4"
+			echo "ieee80211w=1"
+			;;
+		wpa3)
+			echo "wpa=2"
+			echo "wpa_key_mgmt=SAE"
+			echo "rsn_pairwise=CCMP"
+			echo "sae_password=$4"
+			echo "sae_pwe=2"
+			echo "ieee80211w=2"
+			;;
+		esac
+	} >"$_conf"
+	ip netns exec "$WNS" hostapd -t "$_conf" >"$WORK/hostapd-$1.log" 2>&1 &
+	echo $! >"$WORK/hostapd-$1.pid"
+	n=50
+	while ! grep -q AP-ENABLED "$WORK/hostapd-$1.log"; do
+		[ "$n" -le 0 ] && return 1
+		sleep 0.1
+		n=$((n - 1))
+	done
+}
+
+stop_ap() {
+	[ -e "$WORK/hostapd-$1.pid" ] || return 0
+	kill "$(cat "$WORK/hostapd-$1.pid")" 2>/dev/null
+	rm -f "$WORK/hostapd-$1.pid"
+	sleep 0.2
+}
+
 teardown_net() {
 	unsubscribe
 	kill_daemon
 	stop_dnsmasq
 	kill_ns "$NS"
 	kill_ns "$EVIL"
+	wifi_teardown || not_ok "mac80211_hwsim unloads"
 	ip link del "${IF}p" 2>/dev/null
 	ip link del "${IF2}p" 2>/dev/null
 	ip link del "${EVIF}p" 2>/dev/null

@@ -6,6 +6,7 @@ VERSION = $(shell grep '^version=' metapkg | cut -d= -f2)
 TUNDRA_IP_PATH ?= /usr/bin/tundra-ip
 TUNDRA_DHCPC_PATH ?= /usr/bin/tundra-dhcpc
 TUNDRA_BLUEICE_ARP_PATH ?= /usr/bin/tundra-blueice-arp
+TUNDRA_WPA_SUPPLICANT_PATH ?= /usr/bin/wpa_supplicant
 TUNDRA_NETWORKD_CONF_DIR ?= /etc/tundra/network
 TUNDRA_NETWORKD_RUN_DIR ?= /run/tundra/network
 TUNDRA_NETWORKD_SOCKET ?= /run/tundra/network.socket
@@ -16,6 +17,7 @@ TUNDRA_DEFS = -D_GNU_SOURCE -DTUNDRA_NETWORKD_VERSION=\"$(VERSION)\" \
               -DTUNDRA_IP_PATH=\"$(TUNDRA_IP_PATH)\" \
               -DTUNDRA_DHCPC_PATH=\"$(TUNDRA_DHCPC_PATH)\" \
               -DTUNDRA_BLUEICE_ARP_PATH=\"$(TUNDRA_BLUEICE_ARP_PATH)\" \
+              -DTUNDRA_WPA_SUPPLICANT_PATH=\"$(TUNDRA_WPA_SUPPLICANT_PATH)\" \
               -DTUNDRA_NETWORKD_CONF_DIR=\"$(TUNDRA_NETWORKD_CONF_DIR)\" \
               -DTUNDRA_NETWORKD_RUN_DIR=\"$(TUNDRA_NETWORKD_RUN_DIR)\" \
               -DTUNDRA_NETWORKD_SOCKET=\"$(TUNDRA_NETWORKD_SOCKET)\" \
@@ -56,6 +58,7 @@ TEST_DEFS = -D_GNU_SOURCE -DTUNDRA_NETWORKD_VERSION=\"$(VERSION)-test\" \
             -DTUNDRA_IP_PATH=\"$(CURDIR)/tests/tools/tip-wrap.sh\" \
             -DTUNDRA_DHCPC_PATH=\"$(CURDIR)/$(TEST_BUILD)/tools/dhcpc-fake\" \
             -DTUNDRA_BLUEICE_ARP_PATH=\"$(CURDIR)/$(TEST_BUILD)/tools/biarp-fake\" \
+            -DTUNDRA_WPA_SUPPLICANT_PATH=\"$(CURDIR)/tests/tools/wpa-wrap.sh\" \
             -DTUNDRA_NETWORKD_CONF_DIR=\"$(CURDIR)/$(TEST_BUILD)/conf\" \
             -DTUNDRA_NETWORKD_RUN_DIR=\"$(CURDIR)/$(TEST_BUILD)/run\" \
             -DTUNDRA_NETWORKD_SOCKET=\"/run/tundra-test/network.socket\" \
