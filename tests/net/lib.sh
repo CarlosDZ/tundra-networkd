@@ -34,6 +34,7 @@ WBR=tndapbr
 WNET=10.80.0
 WPA_REAL=${WPA_REAL:-/usr/bin/wpa_supplicant}
 export WPA_REAL
+HOSTAPD=${HOSTAPD_REAL:-hostapd}
 
 PASS=0
 FAIL=0
@@ -332,7 +333,7 @@ kill_ns() {
 }
 
 wifi_ready() {
-	for c in hostapd iw wpa_cli "$WPA_REAL"; do
+	for c in "$HOSTAPD" iw wpa_cli "$WPA_REAL"; do
 		command -v "$c" >/dev/null || return 1
 	done
 	modprobe -n mac80211_hwsim 2>/dev/null
@@ -398,8 +399,9 @@ start_ap() {
 			echo "ieee80211w=2"
 			;;
 		esac
+		[ -z "${6:-}" ] || printf '%s\n' "$6"
 	} >"$_conf"
-	ip netns exec "$WNS" hostapd -t "$_conf" >"$WORK/hostapd-$1.log" 2>&1 &
+	ip netns exec "$WNS" "$HOSTAPD" -t "$_conf" >"$WORK/hostapd-$1.log" 2>&1 &
 	echo $! >"$WORK/hostapd-$1.pid"
 	n=50
 	while ! grep -q AP-ENABLED "$WORK/hostapd-$1.log"; do

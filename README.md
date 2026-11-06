@@ -1,18 +1,21 @@
 # tundra-networkd
 
 Network orchestrator, developed for Tundra OS. It connects the networks described
-in the `.tnc` profiles of `/etc/tundra/network/`, supervises `tundra-dhcpc` and
-the `tundra-blueice` sensors, applies fixed addresses, writes `resolv.conf` and
-publishes state and alerts on a control socket. It never decides on its own: it
+in the `.tnc` profiles of `/etc/tundra/network/`, over cable and WiFi, supervises
+`tundra-dhcpc`, `wpa_supplicant` and the `tundra-blueice` sensors, applies fixed
+addresses, writes `resolv.conf` and publishes state and alerts on a control
+socket. It never decides on its own: it
 runs what the profiles and the user ask for.
 
 ## Requirements
 
 - Linux.
 - Root.
-- `tundra-ip` 1.7_1, `tundra-dhcpc` 2.0_0 and `tundra-blueice-arp` 0.1_0 or later,
-  at the paths fixed at build time (`TUNDRA_IP_PATH`, `TUNDRA_DHCPC_PATH`,
-  `TUNDRA_BLUEICE_ARP_PATH`, under `/usr/bin` by default).
+- `tundra-ip` 1.7_1, `tundra-dhcpc` 2.0_0, `tundra-blueice-arp` 0.1_0 and
+  `wpa_supplicant` 2.12 or later, at the paths fixed at build time
+  (`TUNDRA_IP_PATH`, `TUNDRA_DHCPC_PATH`, `TUNDRA_BLUEICE_ARP_PATH`,
+  `TUNDRA_WPA_SUPPLICANT_PATH`, under `/usr/bin` by default). The Tundra build of
+  `wpa_supplicant` follows ADR-028.
 - A `network` group for the users allowed on the control socket.
 
 ## Usage
@@ -223,8 +226,10 @@ make check
   `TIP_REAL`).
 - The WiFi scenarios create three `mac80211_hwsim` radios inside the test
   namespaces, out of reach of any wireless manager on the host, and leave the
-  module loaded without radios. They need `hostapd`, `iw`, `wpa_cli` and
-  `wpa_supplicant` (`/usr/bin/wpa_supplicant`, or `WPA_REAL`).
+  module loaded without radios. They need `hostapd` (or `HOSTAPD_REAL`), `iw`,
+  `wpa_cli` and `wpa_supplicant` (`/usr/bin/wpa_supplicant`, or `WPA_REAL`).
+- The OCV scenario needs a `hostapd` built with `CONFIG_OCV` and
+  `CONFIG_TESTING_OPTIONS` in `HOSTAPD_REAL`, and is skipped without it.
 
 ## Currently unsupported
 

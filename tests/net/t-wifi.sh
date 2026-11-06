@@ -10,7 +10,7 @@ logged_times() {
 }
 
 wpa_conf_is() {
-	[ "$(cat "$RUN/wpa/$WIF.conf")" = "$(printf 'ctrl_interface=%s\nupdate_config=0' "$RUN/wpa")" ]
+	[ "$(cat "$RUN/wpa/$WIF.conf")" = "ctrl_interface=$RUN/wpa" ]
 }
 
 wpa_ping() {

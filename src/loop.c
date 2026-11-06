@@ -453,8 +453,8 @@ static void wpa_failed(struct daemon *d, const char *ifname) {
 static void spawn_wpa(struct daemon *d, const struct action *a) {
 	char conf[PATH_MAX], text[PATH_MAX + 64];
 	snprintf(conf, sizeof(conf), "%s/%s.conf", WPA_DIR, a->iface);
-	int n = snprintf(text, sizeof(text), "ctrl_interface=%s\nupdate_config=0\n",
-	                 WPA_DIR);
+	/* Without update_config: CONFIG_NO_CONFIG_WRITE rejects it (ADR-028). */
+	int n = snprintf(text, sizeof(text), "ctrl_interface=%s\n", WPA_DIR);
 	if (files_make_dirs(WPA_DIR, 0700) < 0 ||
 	    files_write_atomic(conf, text, (size_t)n, 0600) < 0) {
 		fprintf(stderr, "networkd: %s: cannot write %s: %s\n", a->iface, conf,

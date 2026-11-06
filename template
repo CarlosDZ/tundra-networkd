@@ -1,10 +1,10 @@
 # Template file for 'tundra-networkd'
 pkgname=tundra-networkd
-version=0.1
+version=0.2
 revision=0
 build_style=gnu-makefile
 make_check_target=check-unit
-depends="tundra-ip>=1.7_1 tundra-dhcpc>=2.0_0 tundra-blueice-arp>=0.1_0"
+depends="tundra-ip>=1.7_1 tundra-dhcpc>=2.0_0 tundra-blueice-arp>=0.1_0 wpa_supplicant>=2.12_1"
 conf_files="/etc/tundra/network/000-template.tnc /etc/tundra/network/999-dhcp.tnc"
 system_groups="network"
 short_desc="Network orchestrator developed for Tundra OS"
