@@ -83,8 +83,7 @@ while [ "$n" -lt 15 ]; do
 	pids="$pids $!"
 	n=$((n + 1))
 done
-sleep 0.5
-check "a seventeenth client is turned away" reply_is "ERROR too many clients" ALERTS
+eventually "a seventeenth client is turned away" 3 reply_is "ERROR too many clients" ALERTS
 for p in $pids; do
 	kill "$p" 2>/dev/null
 	wait "$p" 2>/dev/null
