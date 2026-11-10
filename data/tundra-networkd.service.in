@@ -27,5 +27,14 @@ ProtectHome=yes
 PrivateTmp=yes
 ProtectControlGroups=yes
 
+# No UMask: /run/tundra/network holds resolv.conf and has to stay readable;
+# every file the daemon writes sets its own mode.
+ProtectProc=invisible
+ProcSubset=pid
+PrivateIPC=yes
+DevicePolicy=closed
+DeviceAllow=/dev/rfkill r
+TasksMax=64
+
 [Install]
 WantedBy=multi-user.target

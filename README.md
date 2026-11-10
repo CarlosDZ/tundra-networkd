@@ -154,6 +154,10 @@ binary that carries it as a file capability (`+ei`), as `tundra-ip`,
 `tundra-dhcpc`, `tundra-blueice-arp` and `wpa_supplicant` do. As root it changes
 nothing.
 
+The unit also hides the processes of other users and the rest of `/proc`, gives
+the service its own IPC namespace, closes the devices except the basic ones and
+`/dev/rfkill`, and limits it to 64 tasks.
+
 Every child gets `TUNDRA_PARENT_PID`, the pid of the daemon: the kernel drops the
 parent-death signal when a file capability takes effect, and the child arms it
 again from that. `/usr/lib/sysusers.d/tundra-networkd.conf` creates the user and

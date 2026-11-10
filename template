@@ -1,7 +1,7 @@
 # Template file for 'tundra-networkd'
 pkgname=tundra-networkd
 version=0.3
-revision=0
+revision=1
 build_style=gnu-makefile
 make_check_target=check-unit
 depends="tundra-ip>=1.8_0 tundra-dhcpc>=2.1_0 tundra-blueice-arp>=0.2_0 wpa_supplicant>=2.12_2"
