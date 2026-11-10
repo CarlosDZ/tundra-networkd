@@ -1,5 +1,6 @@
 #include "load.h"
 #include "loop.h"
+#include "priv.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -22,6 +23,8 @@ int main(int argc, char *argv[]) {
 	static struct config cfg;
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	signal(SIGPIPE, SIG_IGN);
+	if (priv_shed() < 0)
+		return 1;
 	if (conf_load(TUNDRA_NETWORKD_CONF_DIR, &cfg) < 0)
 		return 1;
 	return loop_run(&cfg);

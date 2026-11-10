@@ -109,6 +109,8 @@ install: $(TARGET)
 	sed 's|@BINDIR@|$(PREFIX)/bin|' data/tundra-networkd.service.in \
 		>$(DESTDIR)$(UNITDIR)/tundra-networkd.service
 	chmod 644 $(DESTDIR)$(UNITDIR)/tundra-networkd.service
+	install -Dm644 data/tundra-networkd.sysusers \
+		$(DESTDIR)$(PREFIX)/lib/sysusers.d/tundra-networkd.conf
 	for f in $(CONF_FILES); do \
 		[ -e $(DESTDIR)$(SYSCONFDIR)/tundra/network/$$f ] || \
 		install -Dm644 data/$$f $(DESTDIR)$(SYSCONFDIR)/tundra/network/$$f; \
@@ -119,3 +121,4 @@ uninstall:
 	rm -rf $(DESTDIR)$(PREFIX)/share/licenses/$(TARGET)
 	rm -f $(DESTDIR)$(PREFIX)/share/tundra/network/000-template.tnc
 	rm -f $(DESTDIR)$(UNITDIR)/tundra-networkd.service
+	rm -f $(DESTDIR)$(PREFIX)/lib/sysusers.d/tundra-networkd.conf

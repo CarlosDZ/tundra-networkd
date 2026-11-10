@@ -10,7 +10,8 @@ runs what the profiles and the user ask for.
 ## Requirements
 
 - Linux.
-- Root.
+- Root, or the `tundra-network` user with the capabilities of the unit (see
+  Privileges).
 - `tundra-ip` 1.7_1, `tundra-dhcpc` 2.0_0, `tundra-blueice-arp` 0.1_0 and
   `wpa_supplicant` 2.12 or later, at the paths fixed at build time
   (`TUNDRA_IP_PATH`, `TUNDRA_DHCPC_PATH`, `TUNDRA_BLUEICE_ARP_PATH`,
@@ -142,6 +143,22 @@ that child's pipe is discarded.
 | Anything else, also in `interfaces` | Reconnects |
 | Profile deleted | Disconnects |
 | Profile with errors | Keeps the previous configuration until the next reload |
+
+## Privileges
+
+The unit runs the daemon as `tundra-network`, in the groups `tundra-network` and
+`network`, with `CAP_NET_ADMIN`, `CAP_NET_RAW` and `CAP_NET_BIND_SERVICE` and a
+read-only system (ADR-031). On start the daemon keeps those capabilities only as
+inheritable: it cannot use them, and a child activates one only by running a
+binary that carries it as a file capability (`+ei`), as `tundra-ip`,
+`tundra-dhcpc`, `tundra-blueice-arp` and `wpa_supplicant` do. As root it changes
+nothing.
+
+Every child gets `TUNDRA_PARENT_PID`, the pid of the daemon: the kernel drops the
+parent-death signal when a file capability takes effect, and the child arms it
+again from that. `/usr/lib/sysusers.d/tundra-networkd.conf` creates the user and
+the `network` group. Profiles with a passphrase belong at `0640
+root:tundra-network`.
 
 ## Control socket
 

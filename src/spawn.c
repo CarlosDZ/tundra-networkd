@@ -34,6 +34,11 @@ static pid_t start(const char *path, char *const argv[], int rd, int wr,
 		reset_signals();
 		if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0 || getppid() != parent)
 			_exit(1);
+		/* The kernel drops PDEATHSIG when a file capability takes effect:
+		 * the child arms it again from this (ADR-031). */
+		char ppid[16];
+		snprintf(ppid, sizeof(ppid), "%d", (int)parent);
+		setenv("TUNDRA_PARENT_PID", ppid, 1);
 		dup2(wr, STDOUT_FILENO);
 		dup2(wr, STDERR_FILENO);
 		execv(path, argv);
