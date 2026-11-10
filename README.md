@@ -12,7 +12,7 @@ runs what the profiles and the user ask for.
 - Linux.
 - Root, or the `tundra-network` user with the capabilities of the unit (see
   Privileges).
-- `tundra-ip` 1.7_1, `tundra-dhcpc` 2.0_0, `tundra-blueice-arp` 0.1_0 and
+- `tundra-ip` 1.8_0, `tundra-dhcpc` 2.1_0, `tundra-blueice-arp` 0.2_0 and
   `wpa_supplicant` 2.12 or later, at the paths fixed at build time
   (`TUNDRA_IP_PATH`, `TUNDRA_DHCPC_PATH`, `TUNDRA_BLUEICE_ARP_PATH`,
   `TUNDRA_WPA_SUPPLICANT_PATH`, under `/usr/bin` by default). The Tundra build of
