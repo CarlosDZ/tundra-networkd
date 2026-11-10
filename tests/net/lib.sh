@@ -303,12 +303,17 @@ has_event() {
 	grep -qx -- "$1" "$WORK/events"
 }
 
+# The station side is left down, as a card is at boot: bringing it up is the
+# job of tundra-networkd.
 add_if() {
 	_if=${1:-$IF}
 	ip link add "$_if" type veth peer name "${_if}p"
 	ip link set "$_if" netns "$NS"
 	ip link set "${_if}p" master "$BR" up
-	in_ns ip link set "$_if" up
+}
+
+is_up() {
+	in_ns ip link show "${1:-$IF}" | grep -q '[<,]UP[,>]'
 }
 
 write_lease() {

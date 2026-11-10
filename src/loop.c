@@ -709,6 +709,11 @@ static void execute(struct daemon *d, struct actions *acts) {
 			if ((k = running_child(d, a->iface, K_WPA)))
 				wpa_sync_nets(d, k);
 			break;
+		case A_LINK_UP:
+			if (static_link_up(a) < 0)
+				printf("networkd: %s: cannot bring the interface up\n",
+				       a->iface);
+			break;
 		case A_LINK_DOWN:
 			if (static_link_down(a) < 0)
 				printf("networkd: %s: cannot bring the interface down\n",

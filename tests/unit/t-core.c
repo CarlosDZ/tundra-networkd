@@ -1318,6 +1318,49 @@ static void test_wifi_alerts(void) {
 	      "a network without profile stops the whole interface");
 }
 
+static int index_of(enum act_type t) {
+	for (int i = 0; i < out.n; i++)
+		if (out.a[i].type == t)
+			return i;
+	return -1;
+}
+
+static void test_link_up(void) {
+	reset("");
+	add("10-casa", "tnd0", AUTO);
+	core_link(&c, "tnd0", LINK_PHYSICAL, 0, &out);
+	CHECK(index_of(A_LINK_UP) >= 0 &&
+	          index_of(A_LINK_UP) < index_of(A_SPAWN_DHCPC) &&
+	          logged("bringing the interface up"),
+	      "a cable that is down is brought up before tundra-dhcpc");
+
+	reset("");
+	add("10-casa", "tnd0", AUTO);
+	core_link(&c, "tnd0", LINK_PHYSICAL | LINK_UP, 0, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 1 && count(A_LINK_UP) == 0,
+	      "one that is up is left as it is");
+
+	reset("");
+	add("10-fixed", "tnd0", STATIC);
+	core_link(&c, "tnd0", LINK_PHYSICAL, 0, &out);
+	CHECK(index_of(A_LINK_UP) >= 0 &&
+	          index_of(A_LINK_UP) < index_of(A_SPAWN_PROBE),
+	      "and before the probe of a static address");
+
+	reset("");
+	add("10-manual", "tnd0", MANUAL);
+	core_link(&c, "tnd0", LINK_PHYSICAL, 0, &out);
+	CHECK(count(A_LINK_UP) == 0, "a cable with nothing to connect stays down");
+
+	reset("");
+	add("10-a", "wl0", AUTO);
+	core_link(&c, "wl0", WL, 0, &out);
+	core_wifi_assoc(&c, "wl0", "", (const unsigned char *)"red", 3,
+	                "02:00:00:00:00:00", 5, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 1 && count(A_LINK_UP) == 0,
+	      "on WiFi wpa_supplicant brings it up, not networkd");
+}
+
 int main(void) {
 	test_autoconnect();
 	test_managed();
@@ -1337,5 +1380,6 @@ int main(void) {
 	test_wifi_nets();
 	test_wifi_assoc();
 	test_wifi_alerts();
+	test_link_up();
 	return test_summary();
 }

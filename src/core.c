@@ -371,6 +371,12 @@ static void spawn_with(struct core_iface *ci, const struct profile *p,
 	snprintf(ci->profile, sizeof(ci->profile), "%s", p->name);
 	ci->pending[0] = '\0';
 
+	/* Nothing else brings a cable up; on WiFi, wpa_supplicant does. */
+	if (!ci->wireless && !ci->up) {
+		log_msg(out, ci, "bringing the interface up");
+		push(out, A_LINK_UP, ci);
+	}
+
 	if (p->address == ADDR_STATIC) {
 		ci->started_at = now;
 		ci->want_addr = 0;

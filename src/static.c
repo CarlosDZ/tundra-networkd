@@ -162,6 +162,10 @@ int static_apply(const struct action *a) {
 	return r;
 }
 
+int static_link_up(const struct action *a) {
+	return tip(a->iface, 0, "link", "up", a->iface, NULL);
+}
+
 int static_link_down(const struct action *a) {
 	return tip(a->iface, 0, "link", "down", a->iface, NULL);
 }

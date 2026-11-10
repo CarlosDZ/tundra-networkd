@@ -1,7 +1,7 @@
 name=tundra-networkd
 author=CarlosDZ
-version=0.2_0
-v_date=2026-11-06
+version=0.2_1
+v_date=2026-11-10
 license=GPL-3.0-or-later
 depends=tundra-ip>=1.7_1 tundra-dhcpc>=2.0_0 tundra-blueice-arp>=0.1_0 wpa_supplicant>=2.12_1
 description=Network orchestrator for Tundra OS

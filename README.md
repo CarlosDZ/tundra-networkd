@@ -70,6 +70,9 @@ three servers at most.
 
 ### Connections
 
+- **Link**: a cable that is down is brought up with `tundra-ip link up` right
+  before its connection starts; one with nothing to connect stays down. On WiFi,
+  `wpa_supplicant` brings it up.
 - **DHCP**: one `tundra-dhcpc` per interface, with the `metric`, `table` and
   `carrier-grace` of `interfaces` and `lease-key <profile>`. Its output goes to
   the log as `dhcpc[<if>/<profile>]: …`.

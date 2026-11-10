@@ -15,8 +15,11 @@ $IF {
 }
 END
 cable_profile casa
+check "the interface starts down, as at boot" sh -c "! ip netns exec $NS ip link show $IF | grep -q '[<,]UP[,>]'"
 start_daemon
+expect_log "$IF: bringing the interface up" 5 "the daemon brings it up"
 expect_log "dhcpc\[$IF/casa\]: bound to $NET\." 20 "the profile gets a lease through tundra-dhcpc"
+check "and it is up" is_up
 eventually "the address is applied" 3 has_addr
 eventually "the default route carries the interface metric" 3 sh -c "ip netns exec $NS ip route show default | grep -q 'metric 300'"
 eventually "the lease is stored under the profile key" 3 test -e "$LEASES/$IF-casa.lease"
