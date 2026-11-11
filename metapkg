@@ -1,7 +1,7 @@
 name=tundra-networkd
 author=CarlosDZ
-version=0.4_2
+version=0.5_0
 v_date=2026-11-11
 license=GPL-3.0-or-later
-depends=tundra-ip>=1.8_0 tundra-dhcpc>=2.2_0 tundra-blueice-arp>=0.2_1 wpa_supplicant>=2.12_2 tundra-libblueice>=0.1_0 tundra-libconf>=0.1_0
+depends=tundra-ip>=1.8_0 tundra-dhcpc>=2.2_0 tundra-blueice-arp>=0.2_1 wpa_supplicant>=2.12_2 tundra-libblueice>=0.1_0 tundra-libconf>=0.1_0 tundra-icewall>=0.1_0
 description=Network orchestrator for Tundra OS

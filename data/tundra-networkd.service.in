@@ -3,6 +3,10 @@ Description=Tundra network orchestrator
 Documentation=https://github.com/CarlosDZ/tundra-networkd
 Wants=network.target
 Before=network.target
+# ADR-032: no network without the firewall. If tundra-icewall fails at boot
+# it leaves its lockdown loaded and this unit does not start.
+Requires=tundra-icewall.service
+After=tundra-icewall.service
 
 [Service]
 Type=simple

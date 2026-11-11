@@ -20,6 +20,9 @@ runs what the profiles and the user ask for.
 - tundra-libblueice and tundra-libconf. Checkouts of them next to this one,
   built, are used instead of the installed ones.
 - A `network` group for the users allowed on the control socket.
+- tundra-icewall: the unit requires `tundra-icewall.service`, so there is no
+  network without the firewall policy loaded. Run by hand, the daemon does not
+  depend on it.
 
 ## Usage
 
