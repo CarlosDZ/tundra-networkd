@@ -1,5 +1,5 @@
 #include "ifaces.h"
-#include "grammar.h"
+#include <tundra/conf.h>
 
 #include <errno.h>
 #include <stdarg.h>
@@ -64,7 +64,7 @@ static int valid_table(const char *s) {
 	       strcmp(s, "255") != 0;
 }
 
-static void apply_item(struct iface_conf *c, const struct gr_item *it,
+static void apply_item(struct iface_conf *c, const struct tconf_item *it,
                        int *seen) {
 	static const char *const names[] = {"metric", "table", "carrier-grace",
 	                                    "wifi", "mac"};
@@ -119,18 +119,18 @@ static void apply_item(struct iface_conf *c, const struct gr_item *it,
 }
 
 int ifaces_parse(struct ifaces *f, const char *text, size_t len) {
-	static struct grammar g;
-	int slot[GR_BLOCKS_MAX];
+	static struct tconf g;
+	int slot[TCONF_BLOCKS_MAX];
 	int seen[IFACES_MAX][IFACE_KEYS];
 
 	memset(f, 0, sizeof(*f));
 	memset(seen, 0, sizeof(seen));
 	f->valid = 1;
-	if (gr_parse(text, len, &g) < 0)
+	if (tconf_parse(text, len, &g) < 0)
 		return file_fail(f, g.err_line, "%s", g.err);
 
 	for (int b = 0; b < g.nblocks; b++) {
-		const struct gr_block *blk = &g.blocks[b];
+		const struct tconf_block *blk = &g.blocks[b];
 		int dup = -1;
 		for (int i = 0; i < f->n; i++)
 			if (strcmp(f->items[i].name, blk->name) == 0)
@@ -153,7 +153,7 @@ int ifaces_parse(struct ifaces *f, const char *text, size_t len) {
 	}
 
 	for (int i = 0; i < g.n; i++) {
-		const struct gr_item *it = &g.items[i];
+		const struct tconf_item *it = &g.items[i];
 		if (it->block < 0)
 			return file_fail(f, it->line, "%s outside a block", it->key);
 		int s = slot[it->block];

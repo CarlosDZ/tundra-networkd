@@ -23,16 +23,23 @@ TUNDRA_DEFS = -D_GNU_SOURCE -DTUNDRA_NETWORKD_VERSION=\"$(VERSION)\" \
               -DTUNDRA_NETWORKD_SOCKET=\"$(TUNDRA_NETWORKD_SOCKET)\" \
               -DTUNDRA_NETWORKD_SYSFS=\"$(TUNDRA_NETWORKD_SYSFS)\"
 TUNDRA_INC  = -Isrc -Isrc/conf -Isrc/net
-TUNDRA_LIBS = -ltundra-blueice
+TUNDRA_LIBS = -ltundra-blueice -ltundra-conf
 
-# Development: a checkout of tundra-libblueice next to this one, built, is used
-# instead of an installed library.
+# Development: checkouts of tundra-libblueice and tundra-libconf next to this
+# one, built, are used instead of the installed libraries.
 BLUEICE_DEV ?= $(wildcard ../tundra-libblueice)
 ifneq ($(BLUEICE_DEV),)
 BLUEICE_BUILD = $(abspath $(BLUEICE_DEV))/build
 TUNDRA_INC  += -I$(BLUEICE_DEV)/include
 TUNDRA_LIBS := -L$(BLUEICE_BUILD) $(TUNDRA_LIBS)
-TEST_RPATH   = -Wl,-rpath,$(BLUEICE_BUILD)
+TEST_RPATH  += -Wl,-rpath,$(BLUEICE_BUILD)
+endif
+CONF_DEV ?= $(wildcard ../tundra-libconf)
+ifneq ($(CONF_DEV),)
+CONF_BUILD   = $(abspath $(CONF_DEV))/build
+TUNDRA_INC  += -I$(CONF_DEV)/include
+TUNDRA_LIBS := -L$(CONF_BUILD) $(TUNDRA_LIBS)
+TEST_RPATH  += -Wl,-rpath,$(CONF_BUILD)
 endif
 
 CFLAGS ?= -Wall -Wextra -O2

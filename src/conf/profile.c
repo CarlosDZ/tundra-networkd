@@ -1,5 +1,5 @@
 #include "profile.h"
-#include "grammar.h"
+#include <tundra/conf.h>
 
 #include <arpa/inet.h>
 #include <stdarg.h>
@@ -151,12 +151,12 @@ static uint32_t prefix_mask(int prefix) {
 	return htonl(prefix == 0 ? 0 : 0xffffffffu << (32 - prefix));
 }
 
-static int parse_address(struct profile *p, const struct gr_item *it) {
+static int parse_address(struct profile *p, const struct tconf_item *it) {
 	if (strcmp(it->value, "dhcp") == 0) {
 		p->address = ADDR_DHCP;
 		return 0;
 	}
-	char ip[GR_VALUE_MAX];
+	char ip[TCONF_VALUE_MAX];
 	snprintf(ip, sizeof(ip), "%s", it->value);
 	char *slash = strchr(ip, '/');
 	if (!slash)
@@ -175,7 +175,7 @@ static int parse_address(struct profile *p, const struct gr_item *it) {
 	return 0;
 }
 
-static int parse_gateway(struct profile *p, const struct gr_item *it) {
+static int parse_gateway(struct profile *p, const struct tconf_item *it) {
 	if (p->address != ADDR_STATIC)
 		return pr_fail(p, it->line, "gateway requires a static address");
 	if (parse_ip(it->value, &p->gateway) < 0)
@@ -188,7 +188,7 @@ static int parse_gateway(struct profile *p, const struct gr_item *it) {
 	return 0;
 }
 
-static int parse_dns(struct profile *p, const struct gr_item *it) {
+static int parse_dns(struct profile *p, const struct tconf_item *it) {
 	if (strcmp(it->value, "lease") == 0) {
 		if (p->address != ADDR_DHCP)
 			return pr_fail(p, it->line, "dns = lease requires address = dhcp");
@@ -200,7 +200,7 @@ static int parse_dns(struct profile *p, const struct gr_item *it) {
 		return 0;
 	}
 
-	char buf[GR_VALUE_MAX];
+	char buf[TCONF_VALUE_MAX];
 	snprintf(buf, sizeof(buf), "%s", it->value);
 	char *s = buf;
 	p->dns = DNS_LIST;
@@ -221,7 +221,8 @@ static int parse_dns(struct profile *p, const struct gr_item *it) {
 	}
 }
 
-static int parse_bool(struct profile *p, const struct gr_item *it, int *out) {
+static int parse_bool(struct profile *p, const struct tconf_item *it,
+                      int *out) {
 	if (strcmp(it->value, "yes") == 0)
 		*out = 1;
 	else if (strcmp(it->value, "no") == 0)
@@ -231,7 +232,7 @@ static int parse_bool(struct profile *p, const struct gr_item *it, int *out) {
 	return 0;
 }
 
-static int parse_passphrase(struct profile *p, const struct gr_item *it) {
+static int parse_passphrase(struct profile *p, const struct tconf_item *it) {
 	if (p->security == SEC_WPA2) {
 		if (it->len < 8 || it->len > 63)
 			return pr_fail(p, it->line,
@@ -258,9 +259,9 @@ static int find_key(const char *name) {
 	return -1;
 }
 
-static int check_structure(struct profile *p, const struct grammar *g,
-                           const struct gr_item *seen[KEY_COUNT]) {
-	int block_sec[GR_BLOCKS_MAX];
+static int check_structure(struct profile *p, const struct tconf *g,
+                           const struct tconf_item *seen[KEY_COUNT]) {
+	int block_sec[TCONF_BLOCKS_MAX];
 	int have[2] = {0, 0};
 
 	for (int b = 0; b < g->nblocks; b++) {
@@ -280,7 +281,7 @@ static int check_structure(struct profile *p, const struct grammar *g,
 		return pr_fail(p, 0, "missing apply section");
 
 	for (int i = 0; i < g->n; i++) {
-		const struct gr_item *it = &g->items[i];
+		const struct tconf_item *it = &g->items[i];
 		if (it->block < 0)
 			return pr_fail(p, it->line, "%s outside a section", it->key);
 		int k = find_key(it->key);
@@ -300,7 +301,7 @@ static int check_structure(struct profile *p, const struct grammar *g,
 	return 0;
 }
 
-static const char *missing(const struct gr_item *seen[KEY_COUNT]) {
+static const char *missing(const struct tconf_item *seen[KEY_COUNT]) {
 	static const int required[] = {KEY_INTERFACE, KEY_ADDRESS, KEY_DNS,
 	                               KEY_AUTOCONNECT, KEY_TRUSTED};
 	for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++)
@@ -310,8 +311,8 @@ static const char *missing(const struct gr_item *seen[KEY_COUNT]) {
 }
 
 static int check_values(struct profile *p,
-                        const struct gr_item *seen[KEY_COUNT]) {
-	const struct gr_item *it;
+                        const struct tconf_item *seen[KEY_COUNT]) {
+	const struct tconf_item *it;
 
 	const char *absent = missing(seen);
 	if (absent)
@@ -377,13 +378,13 @@ static int check_values(struct profile *p,
 
 int profile_parse(struct profile *p, const char *name, const char *text,
                   size_t len, int exposed) {
-	static struct grammar g;
-	const struct gr_item *seen[KEY_COUNT] = {0};
+	static struct tconf g;
+	const struct tconf_item *seen[KEY_COUNT] = {0};
 
 	memset(p, 0, sizeof(*p));
 	snprintf(p->name, sizeof(p->name), "%s", name);
 
-	if (gr_parse(text, len, &g) < 0)
+	if (tconf_parse(text, len, &g) < 0)
 		return pr_fail(p, g.err_line, "%s", g.err);
 	if (check_structure(p, &g, seen) < 0 || check_values(p, seen) < 0)
 		return -1;

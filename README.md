@@ -17,8 +17,8 @@ runs what the profiles and the user ask for.
   (`TUNDRA_IP_PATH`, `TUNDRA_DHCPC_PATH`, `TUNDRA_BLUEICE_ARP_PATH`,
   `TUNDRA_WPA_SUPPLICANT_PATH`, under `/usr/bin` by default). The Tundra build of
   `wpa_supplicant` follows ADR-028.
-- tundra-libblueice. A checkout of it next to this one, built, is used instead
-  of an installed one.
+- tundra-libblueice and tundra-libconf. Checkouts of them next to this one,
+  built, are used instead of the installed ones.
 - A `network` group for the users allowed on the control socket.
 
 ## Usage

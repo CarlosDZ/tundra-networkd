@@ -1,4 +1,3 @@
-#include "conf/grammar.c"
 #include "conf/ifaces.c"
 #include "conf/load.c"
 #include "conf/profile.c"

@@ -1,4 +1,3 @@
-#include "conf/grammar.c"
 #include "conf/profile.c"
 #include "test.h"
 

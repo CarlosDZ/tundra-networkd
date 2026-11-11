@@ -1,4 +1,3 @@
-#include "conf/grammar.c"
 #include "conf/profile.c"
 #include "test.h"
 
@@ -50,8 +49,8 @@ int main(void) {
 	      "999-dhcp.tnc is the fallback of ADR-026");
 
 	n = slurp("data/000-template.tnc");
-	struct grammar g;
-	CHECK(n && gr_parse(text, n, &g) == 0 && g.n == 0,
+	static struct tconf g;
+	CHECK(n && tconf_parse(text, n, &g) == 0 && g.n == 0,
 	      "000-template.tnc is all comments");
 	int valid, found = examples(&valid);
 	CHECK(found == 3 && valid == 3,
