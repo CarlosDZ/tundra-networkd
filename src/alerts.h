@@ -12,7 +12,7 @@
 struct stored_alert {
 	unsigned int id;
 	char profile[PROFILE_NAME_MAX + 1];
-	struct alert a;
+	struct blueice_parsed a;
 	char line[ALERT_LINE_MAX];
 };
 
@@ -24,7 +24,7 @@ struct alert_store {
 
 void alerts_init(struct alert_store *s);
 unsigned int alerts_add(struct alert_store *s, const char *profile,
-                        const struct alert *a, const char *line);
+                        const struct blueice_parsed *a, const char *line);
 const struct stored_alert *alerts_find(const struct alert_store *s,
                                        unsigned int id);
 void alerts_remove(struct alert_store *s, unsigned int id);

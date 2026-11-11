@@ -517,7 +517,7 @@ static void test_sensor(void) {
 	out.n = 0;
 	core_sensor_exit(&c, "tnd0", EXITED(2), NULL, 5200, &out);
 	CHECK(logged("failed 3 times in a row") && find_act(A_ALERT) &&
-	          find_act(A_ALERT)->alert == AL_STOP &&
+	          find_act(A_ALERT)->alert == BLUEICE_STOP &&
 	          find_act(A_ALERT)->level == 5 &&
 	          strcmp(find_act(A_ALERT)->kase, "sensor-down") == 0 &&
 	          tnd0()->sst == S_OFF,
@@ -738,7 +738,7 @@ static void test_alerts(void) {
 	core_timer(&c, 3020, &out);
 	out.n = 0;
 	core_sensor_exit(&c, "tnd0", EXITED(1), NULL, 3030, &out);
-	CHECK(find_act(A_ALERT) && find_act(A_ALERT)->alert == AL_WARN &&
+	CHECK(find_act(A_ALERT) && find_act(A_ALERT)->alert == BLUEICE_WARN &&
 	          ci->sst == S_BACKOFF && ci->s_fails == 0,
 	      "a forced sensor-down only warns and keeps relaunching");
 }
@@ -805,7 +805,7 @@ static void test_static(void) {
 	core_probe_exit(&c, "tnd0", EXITED(0), PROBE_TAKEN, "02:aa:aa:aa:aa:01",
 	                "02:bb:bb:bb:bb:bb", 500, &out);
 	a = find_act(A_ALERT);
-	CHECK(a && a->alert == AL_WARN && a->level == 2 &&
+	CHECK(a && a->alert == BLUEICE_WARN && a->level == 2 &&
 	          strcmp(a->kase, "static-taken") == 0 &&
 	          strcmp(a->msg, "ip 192.168.1.50 mac 02:aa:aa:aa:aa:01 src "
 	                         "02:bb:bb:bb:bb:bb") == 0 &&

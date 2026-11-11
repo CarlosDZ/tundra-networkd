@@ -179,7 +179,7 @@ static void load_alerts(struct daemon *d) {
 	}
 	for (int i = 0; i < d->alerts.n; i++) {
 		const struct stored_alert *sa = &d->alerts.items[i];
-		if (sa->a.action == AL_STOP)
+		if (sa->a.action == BLUEICE_STOP)
 			core_restore_stop(&d->core, sa->a.on, sa->profile, sa->a.level,
 			                  sa->id);
 	}
@@ -188,7 +188,7 @@ static void load_alerts(struct daemon *d) {
 }
 
 static void take_alert(struct daemon *d, const char *ifname,
-                       const struct alert *a, const char *line) {
+                       const struct blueice_parsed *a, const char *line) {
 	const struct core_iface *ci = core_find(&d->core, ifname);
 	const char *profile = ci && ci->st != C_IDLE ? ci->profile : "-";
 	struct actions acts = {0};
@@ -199,39 +199,63 @@ static void take_alert(struct daemon *d, const char *ifname,
 	if (alerts_format(alerts_find(&d->alerts, id), fwd, sizeof(fwd)) >= 0)
 		server_broadcast(&d->srv, fwd);
 	core_note_alert(&d->core, ifname, a->level, id);
-	if (a->action == AL_STOP) {
+	if (a->action == BLUEICE_STOP) {
 		core_stop(&d->core, ifname, a->level, id, now_ms(), &acts);
 		execute(d, &acts);
 	}
 	d->dirty = 1;
 }
 
+static const char *own_text(const char *kase) {
+	if (strcmp(kase, "sensor-down") == 0)
+		return "tundra-blueice-arp keeps failing";
+	if (strcmp(kase, "static-taken") == 0)
+		return "static address in use";
+	return kase;
+}
+
+/* act->msg carries the info as "<key> <value>" pairs. */
+static int own_line(char *line, size_t size, const struct action *act,
+                    uint64_t ts_ms) {
+	struct blueice_alert b;
+	char pairs[sizeof(act->msg)];
+	char *save;
+	if (blueice_alert_init(&b, "tundra-networkd", act->kase, act->level,
+	                       own_text(act->kase)) < 0)
+		return -1;
+	snprintf(pairs, sizeof(pairs), "%s", act->msg);
+	for (char *key = strtok_r(pairs, " ", &save); key;
+	     key = strtok_r(NULL, " ", &save)) {
+		char *value = strtok_r(NULL, " ", &save);
+		if (!value)
+			return -1;
+		blueice_alert_add(&b, key, value);
+	}
+	return blueice_alert_format(line, size, &b, act->alert, act->iface, ts_ms);
+}
+
 static void own_alert(struct daemon *d, const struct action *act) {
 	struct timespec ts;
 	char line[OUT_LINE_MAX];
-	struct alert a;
+	struct blueice_parsed a;
 	clock_gettime(CLOCK_REALTIME, &ts);
-	int stop = act->alert == AL_STOP;
-	snprintf(line, sizeof(line),
-	         "alert 111/%d %s by tundra-networkd on %s ts %lld.%03ld reply %s "
-	         "info case %s %s -- %s",
-	         act->level, stop ? "stop" : "warn", act->iface,
-	         (long long)ts.tv_sec, ts.tv_nsec / 1000000,
-	         stop ? "force,disconnect" : "ack,disconnect", act->kase, act->msg,
-	         strcmp(act->kase, "sensor-down") == 0
-	             ? "tundra-blueice-arp keeps failing"
-	         : strcmp(act->kase, "static-taken") == 0 ? "static address in use"
-	                                                  : act->kase);
+	uint64_t ts_ms =
+	    (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+	if (own_line(line, sizeof(line), act, ts_ms) < 0) {
+		printf("networkd: %s: could not format the %s alert\n", act->iface,
+		       act->kase);
+		return;
+	}
 	printf("networkd: %s\n", line);
-	if (alert_parse(line, &a) == 0)
+	if (blueice_alert_parse(line, &a) == 0)
 		take_alert(d, act->iface, &a, line);
 }
 
 static void handle_alert(struct daemon *d, struct child *k) {
 	const char *from =
 	    k->kind == K_DHCPC ? "tundra-dhcpc" : "tundra-blueice-arp";
-	struct alert a;
-	if (alert_parse(k->line, &a) < 0) {
+	struct blueice_parsed a;
+	if (blueice_alert_parse(k->line, &a) < 0) {
 		printf("networkd: %s: malformed alert from %s discarded\n", k->ifname,
 		       from);
 		return;
@@ -1038,10 +1062,11 @@ static const char *do_reply(struct daemon *d, const struct cmd *cmd) {
 
 	struct stored_alert copy = *sa;
 	uint64_t now = now_ms();
-	if (copy.a.action == AL_STOP && strcmp(opt, "force") == 0) {
+	if (copy.a.action == BLUEICE_STOP && strcmp(opt, "force") == 0) {
 		core_force(&d->core, copy.id, copy.a.on, copy.a.kase, copy.a.level, now,
 		           &acts);
-	} else if (copy.a.action == AL_STOP && strcmp(opt, "disconnect") == 0) {
+	} else if (copy.a.action == BLUEICE_STOP &&
+	           strcmp(opt, "disconnect") == 0) {
 		core_release_alert(&d->core, copy.id, now, &acts);
 	} else if (strcmp(opt, "disconnect") == 0) {
 		const struct core_iface *ci = core_find(&d->core, copy.a.on);

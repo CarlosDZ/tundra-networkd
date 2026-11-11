@@ -12,8 +12,8 @@ static const char *line_w =
     "ack,disconnect info case mac-net mac 01:00:5e:00:00:01";
 
 static unsigned int add(const char *profile, const char *line) {
-	struct alert a;
-	if (alert_parse(line, &a) < 0)
+	struct blueice_parsed a;
+	if (blueice_alert_parse(line, &a) < 0)
 		return 0;
 	return alerts_add(&st, profile, &a, line);
 }

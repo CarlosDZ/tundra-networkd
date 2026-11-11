@@ -16,11 +16,11 @@ static void drop_at(struct alert_store *s, int i) {
 }
 
 unsigned int alerts_add(struct alert_store *s, const char *profile,
-                        const struct alert *a, const char *line) {
+                        const struct blueice_parsed *a, const char *line) {
 	if (s->n == ALERTS_MAX) {
 		int victim = 0;
 		for (int i = 0; i < s->n; i++)
-			if (s->items[i].a.action != AL_STOP) {
+			if (s->items[i].a.action != BLUEICE_STOP) {
 				victim = i;
 				break;
 			}
@@ -67,7 +67,7 @@ static int load_line(struct alert_store *s, const char *line) {
 		return -1;
 	struct stored_alert *sa = &s->items[s->n];
 	memset(sa, 0, sizeof(*sa));
-	if (alert_parse(line + used, &sa->a) < 0 ||
+	if (blueice_alert_parse(line + used, &sa->a) < 0 ||
 	    strlen(line + used) >= sizeof(sa->line))
 		return -1;
 	sa->id = id;

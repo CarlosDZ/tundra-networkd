@@ -509,7 +509,7 @@ static void taken(struct core_iface *ci, uint32_t ip, const char *mac,
 	struct action *a = push(out, A_ALERT, ci);
 	if (!a)
 		return;
-	a->alert = AL_WARN;
+	a->alert = BLUEICE_WARN;
 	a->level = STATIC_TAKEN_LEVEL;
 	snprintf(a->kase, sizeof(a->kase), "static-taken");
 	snprintf(a->msg, sizeof(a->msg), "ip %s mac %.32s%s%.32s", addr, mac,
@@ -1228,7 +1228,7 @@ void core_sensor_exit(struct core *c, const char *ifname, int status,
 		int covered = accepted(ci, "sensor-down", SENSOR_DOWN_LEVEL);
 		struct action *a = push(out, A_ALERT, ci);
 		if (a) {
-			a->alert = covered ? AL_WARN : AL_STOP;
+			a->alert = covered ? BLUEICE_WARN : BLUEICE_STOP;
 			a->level = SENSOR_DOWN_LEVEL;
 			snprintf(a->kase, sizeof(a->kase), "sensor-down");
 			snprintf(a->msg, sizeof(a->msg), "fails %d", ci->s_fails);

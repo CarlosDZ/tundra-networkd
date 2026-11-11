@@ -48,7 +48,7 @@ enum probe_result { PROBE_NONE, PROBE_FREE, PROBE_TAKEN };
 enum block_reason { B_NONE, B_CONFIG, B_EXITED, B_ALERT, B_TAKEN };
 
 struct accept {
-	char kase[ALERT_TOKEN_MAX + 1];
+	char kase[BLUEICE_TOKEN_MAX + 1];
 	int level;
 };
 
@@ -105,7 +105,7 @@ struct core_iface {
 	struct wifi_stop wstops[WIFI_STOPS_MAX];
 	int nwstops;
 	char wforced[PROFILE_NAME_MAX + 1];
-	char wf_kase[ALERT_TOKEN_MAX + 1];
+	char wf_kase[BLUEICE_TOKEN_MAX + 1];
 	int wf_level;
 	unsigned int wf_id;
 	unsigned int w_backoff_ms;
@@ -154,10 +154,10 @@ struct action {
 	uint32_t gw;
 	int probe_off;
 	int defend_always;
-	char accept[ACCEPTS_MAX * (ALERT_TOKEN_MAX + 4)];
-	enum alert_action alert;
+	char accept[ACCEPTS_MAX * (BLUEICE_TOKEN_MAX + 4)];
+	enum blueice_action alert;
 	int level;
-	char kase[ALERT_TOKEN_MAX + 1];
+	char kase[BLUEICE_TOKEN_MAX + 1];
 	char msg[160];
 };
 
