@@ -12,7 +12,7 @@ runs what the profiles and the user ask for.
 - Linux.
 - Root, or the `tundra-network` user with the capabilities of the unit (see
   Privileges).
-- `tundra-ip` 1.8_0, `tundra-dhcpc` 2.1_0, `tundra-blueice-arp` 0.2_1 and
+- `tundra-ip` 1.8_0, `tundra-dhcpc` 2.2_0, `tundra-blueice-arp` 0.2_1 and
   `wpa_supplicant` 2.12 or later, at the paths fixed at build time
   (`TUNDRA_IP_PATH`, `TUNDRA_DHCPC_PATH`, `TUNDRA_BLUEICE_ARP_PATH`,
   `TUNDRA_WPA_SUPPLICANT_PATH`, under `/usr/bin` by default). The Tundra build of
@@ -130,7 +130,8 @@ On WiFi the base is applied when `wpa_supplicant` starts, so a reload that
 changes it takes effect the next time it does; the `mac` of a profile takes
 effect on reload, as the rest of the network. A virtual interface has no
 hardware address: `keep` leaves the one it has. The address is never sent in
-DHCP by any other means (tundra-dhcpc sends no hostname or client identifier).
+DHCP by any other means: tundra-dhcpc sends no hostname or client identifier,
+and from 2.2_0 it never asks for the address a previous MAC had.
 
 | tundra-dhcpc exits with | tundra-networkd |
 |-------------------------|-----------------|
