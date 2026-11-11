@@ -23,8 +23,11 @@ struct alert_store {
 };
 
 void alerts_init(struct alert_store *s);
+/* When the store is full an alert leaves to make room: *dropped gets its id,
+ * 0 otherwise. */
 unsigned int alerts_add(struct alert_store *s, const char *profile,
-                        const struct blueice_parsed *a, const char *line);
+                        const struct blueice_parsed *a, const char *line,
+                        unsigned int *dropped);
 const struct stored_alert *alerts_find(const struct alert_store *s,
                                        unsigned int id);
 void alerts_remove(struct alert_store *s, unsigned int id);

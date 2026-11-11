@@ -205,6 +205,11 @@ int proto_event(int connected, const char *ifname, const char *profile,
 	return fit(n, size);
 }
 
+int proto_alert_closed(unsigned int id, const char *how, char *out,
+                       size_t size) {
+	return fit(snprintf(out, size, "event alert-closed %u %s", id, how), size);
+}
+
 const char *proto_connect_error(enum connect_result r) {
 	switch (r) {
 	case CONNECT_OK:

@@ -16,7 +16,9 @@ static void drop_at(struct alert_store *s, int i) {
 }
 
 unsigned int alerts_add(struct alert_store *s, const char *profile,
-                        const struct blueice_parsed *a, const char *line) {
+                        const struct blueice_parsed *a, const char *line,
+                        unsigned int *dropped) {
+	*dropped = 0;
 	if (s->n == ALERTS_MAX) {
 		int victim = 0;
 		for (int i = 0; i < s->n; i++)
@@ -24,6 +26,7 @@ unsigned int alerts_add(struct alert_store *s, const char *profile,
 				victim = i;
 				break;
 			}
+		*dropped = s->items[victim].id;
 		drop_at(s, victim);
 	}
 	struct stored_alert *sa = &s->items[s->n++];

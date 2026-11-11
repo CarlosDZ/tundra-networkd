@@ -190,7 +190,12 @@ profile casa interface enp8s0 autoconnect yes trusted no ssid - security -
 profile cafe interface wlp3s0 autoconnect no trusted no ssid caf%C3%A9 security wpa3
 event connected enp8s0 casa address 10.79.0.100/24
 ALERT 7 casa alert 111/8 stop by tundra-blueice-arp on enp8s0 ts 1762171512.347 reply force,disconnect info case D ...
+event alert-closed 7 force
 ```
+
+`event alert-closed <id> <how>` tells every subscriber that an alert is no
+longer pending: `<how>` is the option it was answered with, or `dropped` when it
+left to make room for a newer one.
 
 `ssid` and `bssid` close every `iface` line, `ssid` and `security` every
 `profile` line, with `-` on a cable; the ssid uses the `%XX` encoding of the
@@ -261,5 +266,3 @@ make check
 
 - WiFi Enterprise (EAP) profiles.
 - IPv6.
-- Sandboxing directives in the unit and dropping privileges.
-- An event when another client answers an alert.

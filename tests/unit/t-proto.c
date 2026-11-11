@@ -201,6 +201,9 @@ int main(void) {
 	CHECK(proto_event(0, "enp8s0", "casa", NULL, out, sizeof(out)) >= 0 &&
 	          strcmp(out, "event disconnected enp8s0 casa") == 0,
 	      "event disconnected");
+	CHECK(proto_alert_closed(7, "force", out, sizeof(out)) >= 0 &&
+	          strcmp(out, "event alert-closed 7 force") == 0,
+	      "event alert-closed");
 	volatile size_t tiny = 10;
 	CHECK(proto_event(0, "enp8s0", "casa", NULL, out, tiny) < 0,
 	      "a line that does not fit is refused");

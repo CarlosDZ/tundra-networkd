@@ -48,6 +48,8 @@ int proto_status(const struct iface_view *v, char *out, size_t size);
 int proto_profile(const struct profile *p, char *out, size_t size);
 int proto_event(int connected, const char *ifname, const char *profile,
                 const char *address, char *out, size_t size);
+int proto_alert_closed(unsigned int id, const char *how, char *out,
+                       size_t size);
 const char *proto_connect_error(enum connect_result r);
 int proto_encode(const unsigned char *in, size_t len, char *out, size_t size);
 

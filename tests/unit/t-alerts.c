@@ -11,11 +11,13 @@ static const char *line_w =
     "alert 111/2 warn by tundra-blueice-arp on tnd1 ts 2.000 reply "
     "ack,disconnect info case mac-net mac 01:00:5e:00:00:01";
 
+static unsigned int dropped;
+
 static unsigned int add(const char *profile, const char *line) {
 	struct blueice_parsed a;
 	if (blueice_alert_parse(line, &a) < 0)
 		return 0;
-	return alerts_add(&st, profile, &a, line);
+	return alerts_add(&st, profile, &a, line, &dropped);
 }
 
 int main(void) {
@@ -60,9 +62,12 @@ int main(void) {
 
 	alerts_init(&st);
 	add("casa", line_d);
-	for (int i = 0; i < ALERTS_MAX; i++)
+	for (int i = 0; i < ALERTS_MAX - 1; i++)
 		add("casa", line_w);
+	CHECK(dropped == 0, "nothing is dropped while there is room");
+	add("casa", line_w);
 	CHECK(st.n == ALERTS_MAX && alerts_find(&st, 1) && !alerts_find(&st, 2),
 	      "when full, the oldest warning goes first, not the stop");
+	CHECK(dropped == 2, "and its id is reported");
 	return test_summary();
 }

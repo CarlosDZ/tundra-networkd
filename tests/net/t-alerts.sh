@@ -40,6 +40,7 @@ check "an unknown alert" reply_is "ERROR unknown alert" ALERT-REPLY 99 force
 check "an id that is not a number" reply_is "ERROR unknown alert" ALERT-REPLY 1x force
 
 check "force" reply_is "OK" ALERT-REPLY 1 force
+eventually "the subscribers learn the alert is closed" 3 has_event "event alert-closed 1 force"
 eventually "brings dhcpc back for the same profile" 3 launched 3
 check "and closes the alert" reply_is "OK" ALERTS
 check "and takes it out of /run" sh -c "! grep -q '^ALERT 1 ' '$RUN/alerts'"

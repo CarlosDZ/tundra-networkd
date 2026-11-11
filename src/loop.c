@@ -187,14 +187,25 @@ static void load_alerts(struct daemon *d) {
 		printf("networkd: %d pending alerts restored\n", d->alerts.n);
 }
 
+static void alert_closed(struct daemon *d, unsigned int id, const char *how) {
+	char line[REPLY_MAX];
+	if (proto_alert_closed(id, how, line, sizeof(line)) >= 0)
+		server_broadcast(&d->srv, line);
+}
+
 static void take_alert(struct daemon *d, const char *ifname,
                        const struct blueice_parsed *a, const char *line) {
 	const struct core_iface *ci = core_find(&d->core, ifname);
 	const char *profile = ci && ci->st != C_IDLE ? ci->profile : "-";
 	struct actions acts = {0};
 	char fwd[REPLY_MAX];
-	unsigned int id = alerts_add(&d->alerts, profile, a, line);
+	unsigned int dropped;
+	unsigned int id = alerts_add(&d->alerts, profile, a, line, &dropped);
 	save_alerts(d);
+	if (dropped) {
+		printf("networkd: alert %u dropped, too many pending\n", dropped);
+		alert_closed(d, dropped, "dropped");
+	}
 	printf("networkd: %s: alert %u recorded\n", ifname, id);
 	if (alerts_format(alerts_find(&d->alerts, id), fwd, sizeof(fwd)) >= 0)
 		server_broadcast(&d->srv, fwd);
@@ -1076,6 +1087,7 @@ static const char *do_reply(struct daemon *d, const struct cmd *cmd) {
 	alerts_remove(&d->alerts, copy.id);
 	save_alerts(d);
 	printf("networkd: alert %u answered with %s\n", copy.id, opt);
+	alert_closed(d, copy.id, opt);
 	execute(d, &acts);
 	d->dirty = 1;
 	return NULL;
