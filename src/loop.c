@@ -81,6 +81,7 @@ struct wpa_table {
 	struct wpa_net items[PROFILES_MAX];
 	int n;
 	int disconnected;
+	uint64_t scan_ms;
 };
 
 struct conn_view {
@@ -718,6 +719,12 @@ static void on_wpa_event(struct daemon *d, struct child *k) {
 			       k->ifname, ev.bssid, ev.reason);
 			core_wifi_lost(&d->core, k->ifname);
 			d->dirty = 1;
+		} else if (ev.type == WPA_EV_SCAN_RESULTS) {
+			struct wpa_table *t = wpa_table_of(d, k->ifname);
+			if (t)
+				t->scan_ms = now_ms();
+			if (proto_scan_event(k->ifname, msg, sizeof(msg)) >= 0)
+				server_broadcast(&d->srv, msg);
 		}
 	}
 }
@@ -1058,6 +1065,71 @@ static void reply_alerts(struct daemon *d, int client) {
 	server_send(&d->srv, client, "OK");
 }
 
+static const char *known_profile(const struct config *cfg, const char *ifname,
+                                 const struct wpa_bss *b) {
+	for (int i = 0; i < cfg->n; i++) {
+		const struct profile *p = &cfg->profiles[i];
+		if (p->valid && p->has_ssid && b->ssid_len == p->ssid_len &&
+		    memcmp(p->ssid, b->ssid, b->ssid_len) == 0 &&
+		    (p->any_interface || strcmp(p->interface, ifname) == 0))
+			return p->name;
+	}
+	return NULL;
+}
+
+static struct child *wifi_child(struct daemon *d, int i) {
+	struct child *k = &d->kids[i];
+	return k->used && !k->reaped && k->kind == K_WPA && k->wpa.ctl >= 0 ? k
+	                                                                    : NULL;
+}
+
+static int wifi_wanted(const struct child *k, const struct cmd *cmd) {
+	return cmd->nargs == 0 || strcmp(k->ifname, cmd->args[0]) == 0;
+}
+
+static void reply_networks(struct daemon *d, int client,
+                           const struct cmd *cmd) {
+	static char text[WPA_EVENT_MAX];
+	static struct wpa_bss found[WPA_SCAN_MAX];
+	char line[REPLY_MAX];
+	int any = 0;
+	for (int i = 0; i < CHILDREN_MAX; i++) {
+		struct child *k = wifi_child(d, i);
+		if (!k || !wifi_wanted(k, cmd))
+			continue;
+		any = 1;
+		const struct wpa_table *t = wpa_table_of(d, k->ifname);
+		long age =
+		    t && t->scan_ms ? (long)((now_ms() - t->scan_ms) / 1000) : -1;
+		if (proto_scan(k->ifname, age, line, sizeof(line)) >= 0)
+			server_send(&d->srv, client, line);
+		if (wpa_cmd(k, text, sizeof(text), "SCAN_RESULTS") < 0)
+			continue;
+		int n = wpactl_scan_results(text, strlen(text), found, WPA_SCAN_MAX);
+		for (int j = 0; j < n; j++)
+			if (proto_network(k->ifname, &found[j],
+			                  known_profile(d->cfg, k->ifname, &found[j]), line,
+			                  sizeof(line)) >= 0)
+				server_send(&d->srv, client, line);
+	}
+	server_send(&d->srv, client,
+	            any || cmd->nargs == 0 ? "OK" : "ERROR no such wifi interface");
+}
+
+static const char *do_scan(struct daemon *d, const struct cmd *cmd) {
+	int any = 0, started = 0;
+	for (int i = 0; i < CHILDREN_MAX; i++) {
+		struct child *k = wifi_child(d, i);
+		if (!k || !wifi_wanted(k, cmd))
+			continue;
+		any = 1;
+		started |= wpa_ok(k, "SCAN");
+	}
+	if (!any)
+		return "ERROR no such wifi interface";
+	return started ? NULL : "ERROR scan refused, try again";
+}
+
 static const char *do_reply(struct daemon *d, const struct cmd *cmd) {
 	char *end;
 	unsigned long id = strtoul(cmd->args[0], &end, 10);
@@ -1137,6 +1209,13 @@ static void on_command(void *ctx, int client, const char *line) {
 		return;
 	case CMD_ALERT_REPLY:
 		err = do_reply(d, &cmd);
+		server_send(&d->srv, client, err ? err : "OK");
+		return;
+	case CMD_NETWORKS:
+		reply_networks(d, client, &cmd);
+		return;
+	case CMD_SCAN:
+		err = do_scan(d, &cmd);
 		server_send(&d->srv, client, err ? err : "OK");
 		return;
 	}

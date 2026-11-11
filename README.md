@@ -182,6 +182,8 @@ group does not exist). One command per line; each one answers `OK` or
 | `SUBSCRIBE` | From then on, `event` and `ALERT` lines |
 | `ALERTS` | One `ALERT` line per pending alert |
 | `ALERT-REPLY <id> <option>` | One of the options the alert offers in `reply` |
+| `NETWORKS [interface]` | The last scan of each WiFi interface: a `scan` line and one `network` line per access point |
+| `SCAN [interface]` | Starts a scan; `event scan <interface>` follows when there are results |
 
 ```
 iface enp8s0 state connected profile casa address 10.79.0.100/24 trusted no override - alert - ssid - bssid -
@@ -191,11 +193,22 @@ profile cafe interface wlp3s0 autoconnect no trusted no ssid caf%C3%A9 security 
 event connected enp8s0 casa address 10.79.0.100/24
 ALERT 7 casa alert 111/8 stop by tundra-blueice-arp on enp8s0 ts 1762171512.347 reply force,disconnect info case D ...
 event alert-closed 7 force
+scan wlp3s0 age 12
+network wlp3s0 ssid caf%C3%A9 bssid 52:54:00:12:34:56 freq 2412 signal -48 security wpa3 profile cafe
+event scan wlp3s0
 ```
 
 `event alert-closed <id> <how>` tells every subscriber that an alert is no
 longer pending: `<how>` is the option it was answered with, or `dropped` when it
 left to make room for a newer one.
+
+`NETWORKS` answers at once with what `wpa_supplicant` last saw and never scans:
+`age` is the seconds since the last results (`-` before the first), `signal` is
+in dBm, `ssid -` is a hidden network and `profile` names the first profile for
+that ssid on that interface. `security` is `open`, `owe`, `wep`, `wpa`, `wpa2`,
+`wpa2/wpa3`, `wpa3` or `enterprise`. At most 48 access points per interface.
+Scanning sends probes, so it only happens on `SCAN` or when `wpa_supplicant`
+looks for a network to join; `event scan` follows both.
 
 `ssid` and `bssid` close every `iface` line, `ssid` and `security` every
 `profile` line, with `-` on a cable; the ssid uses the `%XX` encoding of the

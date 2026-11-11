@@ -213,5 +213,38 @@ int main(void) {
 	      "connect results become replies");
 	CHECK(strcmp(proto_connect_error(CONNECT_OFF), "ERROR wifi is off") == 0,
 	      "CONNECT on an interface with wifi = no");
+	CHECK(parsed("NETWORKS", CMD_NETWORKS, 0) &&
+	          parsed("NETWORKS wlp3s0", CMD_NETWORKS, 1) &&
+	          parsed("SCAN", CMD_SCAN, 0) && parsed("SCAN wlp3s0", CMD_SCAN, 1),
+	      "NETWORKS and SCAN, with or without interface");
+	CHECK(bad("SCAN a b", "ERROR usage: SCAN [interface]"),
+	      "SCAN with two arguments");
+	struct wpa_bss bss = {.bssid = "02:00:00:00:01:00",
+	                      .freq = 2412,
+	                      .signal = -30,
+	                      .sec = WSEC_WPA3,
+	                      .ssid = "caf\xc3\xa9",
+	                      .ssid_len = 5};
+	CHECK(proto_network("wlp3s0", &bss, "casa", out, sizeof(out)) >= 0 &&
+	          strcmp(out, "network wlp3s0 ssid caf%C3%A9 bssid "
+	                      "02:00:00:00:01:00 freq 2412 signal -30 security "
+	                      "wpa3 profile casa") == 0,
+	      "a network line");
+	bss.ssid_len = 0;
+	CHECK(proto_network("wlp3s0", &bss, NULL, out, sizeof(out)) >= 0 &&
+	          strstr(out, " ssid - ") && strstr(out, " profile -"),
+	      "a hidden network without profile");
+	bss.sec = WSEC_WPA2_WPA3;
+	CHECK(proto_network("wlp3s0", &bss, NULL, out, sizeof(out)) >= 0 &&
+	          strstr(out, " security wpa2/wpa3 "),
+	      "transition mode is one token");
+	CHECK(proto_scan("wlp3s0", 12, out, sizeof(out)) >= 0 &&
+	          strcmp(out, "scan wlp3s0 age 12") == 0 &&
+	          proto_scan("wlp3s0", -1, out, sizeof(out)) >= 0 &&
+	          strcmp(out, "scan wlp3s0 age -") == 0,
+	      "the age of the scan, or none yet");
+	CHECK(proto_scan_event("wlp3s0", out, sizeof(out)) >= 0 &&
+	          strcmp(out, "event scan wlp3s0") == 0,
+	      "event scan");
 	return test_summary();
 }

@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -47,9 +48,14 @@ int main(int argc, char *argv[]) {
 		perror("connect error");
 		return 2;
 	}
+	/* A server that turns the client away closes at once: the reply is still
+	 * there to read after a failed send. */
+	signal(SIGPIPE, SIG_IGN);
 	const char *line = argc - i == 2 ? argv[i + 1] : NULL;
-	if (line ? send_all(fd, line, strlen(line)) < 0 || send_all(fd, "\n", 1) < 0
-	         : send_stdin(fd) < 0) {
+	if ((line
+	         ? send_all(fd, line, strlen(line)) < 0 || send_all(fd, "\n", 1) < 0
+	         : send_stdin(fd) < 0) &&
+	    errno != EPIPE && errno != ECONNRESET) {
 		perror("send error");
 		return 2;
 	}

@@ -19,6 +19,8 @@ static const struct {
     {"ALERTS", CMD_ALERTS, 0, 0, "ERROR usage: ALERTS"},
     {"ALERT-REPLY", CMD_ALERT_REPLY, 2, 2,
      "ERROR usage: ALERT-REPLY <id> <option>"},
+    {"NETWORKS", CMD_NETWORKS, 0, 1, "ERROR usage: NETWORKS [interface]"},
+    {"SCAN", CMD_SCAN, 0, 1, "ERROR usage: SCAN [interface]"},
 };
 
 void proto_parse(const char *line, struct cmd *out) {
@@ -208,6 +210,52 @@ int proto_event(int connected, const char *ifname, const char *profile,
 int proto_alert_closed(unsigned int id, const char *how, char *out,
                        size_t size) {
 	return fit(snprintf(out, size, "event alert-closed %u %s", id, how), size);
+}
+
+static const char *bss_security(enum wpa_sec sec) {
+	switch (sec) {
+	case WSEC_OPEN:
+		break;
+	case WSEC_OWE:
+		return "owe";
+	case WSEC_WEP:
+		return "wep";
+	case WSEC_WPA:
+		return "wpa";
+	case WSEC_WPA2:
+		return "wpa2";
+	case WSEC_WPA2_WPA3:
+		return "wpa2/wpa3";
+	case WSEC_WPA3:
+		return "wpa3";
+	case WSEC_ENTERPRISE:
+		return "enterprise";
+	}
+	return "open";
+}
+
+int proto_scan(const char *ifname, long age_s, char *out, size_t size) {
+	if (age_s < 0)
+		return fit(snprintf(out, size, "scan %s age -", ifname), size);
+	return fit(snprintf(out, size, "scan %s age %ld", ifname, age_s), size);
+}
+
+int proto_network(const char *ifname, const struct wpa_bss *b,
+                  const char *profile, char *out, size_t size) {
+	char ssid[3 * SSID_MAX + 1] = "-";
+	if (b->ssid_len &&
+	    proto_encode(b->ssid, b->ssid_len, ssid, sizeof(ssid)) < 0)
+		return -1;
+	return fit(snprintf(out, size,
+	                    "network %s ssid %s bssid %s freq %d signal %d "
+	                    "security %s profile %s",
+	                    ifname, ssid, b->bssid, b->freq, b->signal,
+	                    bss_security(b->sec), profile ? profile : "-"),
+	           size);
+}
+
+int proto_scan_event(const char *ifname, char *out, size_t size) {
+	return fit(snprintf(out, size, "event scan %s", ifname), size);
 }
 
 const char *proto_connect_error(enum connect_result r) {

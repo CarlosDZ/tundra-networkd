@@ -83,7 +83,16 @@ while [ "$n" -lt 15 ]; do
 	pids="$pids $!"
 	n=$((n + 1))
 done
+_failed=$FAIL
 eventually "a seventeenth client is turned away" 3 reply_is "ERROR too many clients" ALERTS
+[ "$FAIL" -eq "$_failed" ] || {
+	_alive=0
+	for p in $pids $EV_PID; do
+		kill -0 "$p" 2>/dev/null && _alive=$((_alive + 1))
+	done
+	echo "#   clients still connected: $_alive of 16"
+	echo "#   the seventeenth got: $(cmd ALERTS | tr '\n' '|')"
+}
 for p in $pids; do
 	kill "$p" 2>/dev/null
 	wait "$p" 2>/dev/null

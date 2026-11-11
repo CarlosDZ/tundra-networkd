@@ -3,6 +3,7 @@
 
 #include "core.h"
 #include "profile.h"
+#include "wpactl.h"
 
 #include <stddef.h>
 
@@ -18,6 +19,8 @@ enum cmd_type {
 	CMD_SUBSCRIBE,
 	CMD_ALERTS,
 	CMD_ALERT_REPLY,
+	CMD_NETWORKS,
+	CMD_SCAN,
 	CMD_BAD
 };
 
@@ -50,6 +53,10 @@ int proto_event(int connected, const char *ifname, const char *profile,
                 const char *address, char *out, size_t size);
 int proto_alert_closed(unsigned int id, const char *how, char *out,
                        size_t size);
+int proto_scan(const char *ifname, long age_s, char *out, size_t size);
+int proto_network(const char *ifname, const struct wpa_bss *b,
+                  const char *profile, char *out, size_t size);
+int proto_scan_event(const char *ifname, char *out, size_t size);
 const char *proto_connect_error(enum connect_result r);
 int proto_encode(const unsigned char *in, size_t len, char *out, size_t size);
 

@@ -97,6 +97,28 @@ check "and it stays disconnected" wpa_state_is DISCONNECTED
 check "CONNECT again" reply_is "OK" CONNECT 10-casa
 eventually "reconnects with that profile" 20 on_profile 10-casa
 
+networks_have() {
+	cmd NETWORKS "$WIF" | grep -qx "$1"
+}
+
+check "NETWORKS on a cable" reply_is "ERROR no such wifi interface" NETWORKS "$IF"
+check "SCAN on a cable" reply_is "ERROR no such wifi interface" SCAN "$IF"
+subscribe
+eventually "subscribed" 3 has_event OK
+check "SCAN" reply_is "OK" SCAN "$WIF"
+eventually "its results are announced" 20 has_event "event scan $WIF"
+unsubscribe
+check "the association survives the scan" on_profile 10-casa
+check "NETWORKS starts with the age of the scan" sh -c "$TOOLS/ctl '$SOCK' NETWORKS | head -n 1 | grep -qx 'scan $WIF age [0-9]*'"
+check "lists the access point with its profile" networks_have "network $WIF ssid tnd-wpa3 bssid [0-9a-f:]* freq [0-9]* signal -[0-9]* security wpa3 profile 10-casa"
+_failed=$FAIL
+check "and the open one, with its ssid encoded" networks_have "network $WIF ssid tnd%20open bssid [0-9a-f:]* freq [0-9]* signal -[0-9]* security open profile 20-cafe"
+[ "$FAIL" -eq "$_failed" ] || {
+	"$TOOLS/ctl" "$SOCK" NETWORKS | sed 's/^/#   /'
+	wcli scan_results | sed 's/^/#   wpa: /'
+}
+check "and ends with OK" sh -c "$TOOLS/ctl '$SOCK' NETWORKS | tail -n 1 | grep -qx OK"
+
 before=$(associations)
 casa=$(net_id 10-casa)
 rm -f "$CONF/30-twin.tnc"

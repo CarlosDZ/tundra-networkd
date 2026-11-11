@@ -43,6 +43,11 @@ static int vars_are(const char *const *want, int n) {
 	return 1;
 }
 
+static int scanned(const char *text) {
+	struct wpa_bss one[2];
+	return wpactl_scan_results(text, strlen(text), one, 2);
+}
+
 int main(void) {
 	CHECK(event("<3>CTRL-EVENT-CONNECTED - Connection to 02:00:00:00:01:00 "
 	            "completed [id=0 id_str=casa]") == 0 &&
@@ -67,7 +72,8 @@ int main(void) {
 	CHECK(event("<2>CTRL-EVENT-TERMINATING") == 0 &&
 	          ev.type == WPA_EV_TERMINATING,
 	      "wpa_supplicant terminating");
-	CHECK(event("<3>CTRL-EVENT-SCAN-RESULTS ") == 0 && ev.type == WPA_EV_OTHER,
+	CHECK(event("<3>CTRL-EVENT-BSS-ADDED 0 02:00:00:00:01:00") == 0 &&
+	          ev.type == WPA_EV_OTHER,
 	      "an event that does not matter");
 	CHECK(event("OK") < 0 && event("") < 0 && event("<3") < 0,
 	      "a reply is not an event");
@@ -137,5 +143,52 @@ int main(void) {
 	static const char *const open[] = {"ssid 626172", "id_str \"30-bar\"",
 	                                   "key_mgmt NONE"};
 	CHECK(vars_are(open, 3), "open: no key");
+	CHECK(event("<3>CTRL-EVENT-SCAN-RESULTS ") == 0 &&
+	          ev.type == WPA_EV_SCAN_RESULTS,
+	      "a scan results event");
+	CHECK(event("<3>CTRL-EVENT-SCAN-STARTED ") == 0 && ev.type == WPA_EV_OTHER,
+	      "the start of a scan is not its results");
+
+	static struct wpa_bss b[4];
+	const char *scan =
+	    "bssid / frequency / signal level / flags / ssid\n"
+	    "02:00:00:00:01:00\t2412\t-30\t[WPA2-SAE-CCMP][ESS]\ttnd-wpa3\n"
+	    "02:00:00:00:02:00\t5180\t-71\t[WPA2-PSK+SAE-CCMP][ESS]\tcaf\\xc3\\xa9 "
+	    "libre\n"
+	    "02:00:00:00:03:00\t2437\t-50\t[ESS]\t\n"
+	    "not a line\n"
+	    "02:00:00:00:04:00\t2462\t-60\t[WPA2-EAP-CCMP][ESS]\tcorp\n"
+	    "02:00:00:00:05:00\t2462\t-60\t[WEP][ESS]\told\n";
+	int found = wpactl_scan_results(scan, strlen(scan), b, 4);
+	CHECK(found == 4,
+	      "the header and broken lines are skipped, the rest capped");
+	CHECK(strcmp(b[0].bssid, "02:00:00:00:01:00") == 0 && b[0].freq == 2412 &&
+	          b[0].signal == -30 && b[0].sec == WSEC_WPA3 &&
+	          b[0].ssid_len == 8 && memcmp(b[0].ssid, "tnd-wpa3", 8) == 0,
+	      "an access point with every field");
+	CHECK(b[1].sec == WSEC_WPA2_WPA3 && b[1].ssid_len == 11 &&
+	          memcmp(b[1].ssid, "caf\xc3\xa9 libre", 11) == 0,
+	      "transition mode and an escaped ssid");
+	CHECK(b[2].sec == WSEC_OPEN && b[2].ssid_len == 0,
+	      "an open hidden network");
+	CHECK(b[3].sec == WSEC_ENTERPRISE, "an enterprise network");
+
+	const char *more =
+	    "02:00:00:00:06:00\t2412\t-30\t[WPA-PSK-TKIP][ESS]\ta\n"
+	    "02:00:00:00:07:00\t2412\t-30\t[WPA2-PSK-CCMP][ESS]\tb\n"
+	    "02:00:00:00:08:00\t2412\t-30\t[OWE-TRANS][ESS]\tc\n"
+	    "02:00:00:00:09:00\t2412\t-30\t[WEP][ESS]\t\\x00\\x00\\x00";
+	found = wpactl_scan_results(more, strlen(more), b, 4);
+	CHECK(found == 4 && b[0].sec == WSEC_WPA && b[1].sec == WSEC_WPA2 &&
+	          b[2].sec == WSEC_OWE && b[3].sec == WSEC_WEP,
+	      "wpa, wpa2, owe and wep");
+	CHECK(b[3].ssid_len == 0, "an ssid of zeros is a hidden network");
+	CHECK(scanned("02:00:00:00:01:0g\t1\t1\t[ESS]\tx\n") == 0 &&
+	          scanned("02:00:00:00:01:00\tx\t1\t[ESS]\tx\n") == 0 &&
+	          scanned("02:00:00:00:01:00\t1\t1\n") == 0 &&
+	          scanned("02:00:00:00:01:00\t1\t1\t[ESS]\t\\q\n") == 0,
+	      "a bad bssid, a bad number, a short line and a bad escape");
+	CHECK(scanned("02:00:00:00:01:00\t1\t1\t[ESS]") == 1 && scanned("") == 0,
+	      "a line without ssid or newline, and no lines");
 	return test_summary();
 }
