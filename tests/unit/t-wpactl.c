@@ -43,6 +43,10 @@ static int vars_are(const char *const *want, int n) {
 	return 1;
 }
 
+static int last_is(const char *var) {
+	return net.n > 0 && strcmp(net.vars[net.n - 1], var) == 0;
+}
+
 static int scanned(const char *text) {
 	struct wpa_bss one[2];
 	return wpactl_scan_results(text, strlen(text), one, 2);
@@ -110,7 +114,7 @@ int main(void) {
 	wpactl_hex((const unsigned char *)"", 0, hex);
 	CHECK(hex[0] == '\0', "an empty SSID");
 	struct profile p = wifi("10-casa", "casa", SEC_WPA3, "correct \"horse\"");
-	wpactl_network(&p, &net);
+	wpactl_network(&p, MAC_KEEP, NULL, &net);
 	static const char *const wpa3[] = {
 	    "ssid 63617361",
 	    "id_str \"10-casa\"",
@@ -119,30 +123,61 @@ int main(void) {
 	    "pairwise CCMP",
 	    "ieee80211w 2",
 	    "sae_password 636f72726563742022686f72736522",
-	    "ocv 1"};
-	CHECK(vars_are(wpa3, 8), "wpa3: SAE, PMF required and the password in hex");
+	    "ocv 1",
+	    "mac_addr 0"};
+	CHECK(vars_are(wpa3, 9), "wpa3: SAE, PMF required and the password in hex");
 	CHECK(net.optional[7] && !net.optional[4], "only ocv is optional");
 	uint64_t h = net.hash;
-	wpactl_network(&p, &net);
+	wpactl_network(&p, MAC_KEEP, NULL, &net);
 	CHECK(net.hash == h, "the same profile, the same hash");
 	snprintf(p.passphrase, sizeof(p.passphrase), "another one");
-	wpactl_network(&p, &net);
+	wpactl_network(&p, MAC_KEEP, NULL, &net);
 	CHECK(net.hash != h, "a new passphrase changes it");
 
 	p = wifi("20-cafe", "caf\xc3\xa9 1", SEC_WPA2, "correct horse");
-	wpactl_network(&p, &net);
+	wpactl_network(&p, MAC_KEEP, NULL, &net);
 	static const char *const wpa2[] = {
-	    "ssid 636166c3a92031",  "id_str \"20-cafe\"",
-	    "key_mgmt WPA-PSK",     "proto RSN",
-	    "pairwise CCMP",        "ieee80211w 1",
-	    "psk \"correct horse\""};
-	CHECK(vars_are(wpa2, 7), "wpa2: WPA-PSK, optional PMF, quoted passphrase");
+	    "ssid 636166c3a92031",   "id_str \"20-cafe\"",
+	    "key_mgmt WPA-PSK",      "proto RSN",
+	    "pairwise CCMP",         "ieee80211w 1",
+	    "psk \"correct horse\"", "mac_addr 0"};
+	CHECK(vars_are(wpa2, 8), "wpa2: WPA-PSK, optional PMF, quoted passphrase");
 
 	p = wifi("30-bar", "bar", SEC_OPEN, "");
-	wpactl_network(&p, &net);
+	wpactl_network(&p, MAC_KEEP, NULL, &net);
 	static const char *const open[] = {"ssid 626172", "id_str \"30-bar\"",
-	                                   "key_mgmt NONE"};
-	CHECK(vars_are(open, 3), "open: no key");
+	                                   "key_mgmt NONE", "mac_addr 0"};
+	CHECK(vars_are(open, 4), "open: no key");
+
+	static const unsigned char hw[MAC_LEN] = {0x52, 0x54, 0x00,
+	                                          0x12, 0x34, 0x56};
+	h = net.hash;
+	CHECK(last_is("mac_addr 0"), "no mac anywhere keeps the hardware address");
+	wpactl_network(&p, MAC_RANDOM, hw, &net);
+	CHECK(last_is("mac_addr 1") && net.hash != h,
+	      "a random base makes the network random");
+	wpactl_network(&p, MAC_FIXED, hw, &net);
+	CHECK(last_is("mac_addr 0"),
+	      "a fixed base is already the address of the interface");
+	p.mac.mode = MAC_RANDOM;
+	wpactl_network(&p, MAC_KEEP, hw, &net);
+	CHECK(last_is("mac_addr 1"), "mac = random in the profile");
+	p.mac =
+	    (struct mac_policy){MAC_FIXED, {0x02, 0x12, 0x34, 0x56, 0x78, 0x9a}};
+	wpactl_network(&p, MAC_RANDOM, hw, &net);
+	CHECK(last_is("mac_addr 3") &&
+	          strcmp(net.vars[net.n - 2], "mac_value 02:12:34:56:78:9a") == 0,
+	      "a fixed mac in the profile, its value set first");
+	p.mac.mode = MAC_KEEP;
+	wpactl_network(&p, MAC_KEEP, hw, &net);
+	CHECK(last_is("mac_addr 0"), "mac = keep over a base that keeps");
+	wpactl_network(&p, MAC_RANDOM, hw, &net);
+	CHECK(last_is("mac_addr 3") &&
+	          strcmp(net.vars[net.n - 2], "mac_value 52:54:00:12:34:56") == 0,
+	      "mac = keep over another base asks for the hardware address");
+	wpactl_network(&p, MAC_RANDOM, NULL, &net);
+	CHECK(last_is("mac_addr 0"),
+	      "without a known hardware address, the one of the interface");
 	CHECK(event("<3>CTRL-EVENT-SCAN-RESULTS ") == 0 &&
 	          ev.type == WPA_EV_SCAN_RESULTS,
 	      "a scan results event");

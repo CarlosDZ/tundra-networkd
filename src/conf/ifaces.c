@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IFACE_KEYS 4
+#define IFACE_KEYS 5
 
 static void set_error(char *dst, int line, const char *fmt, va_list ap) {
 	char msg[CONF_ERR_MAX - 16];
@@ -67,7 +67,7 @@ static int valid_table(const char *s) {
 static void apply_item(struct iface_conf *c, const struct gr_item *it,
                        int *seen) {
 	static const char *const names[] = {"metric", "table", "carrier-grace",
-	                                    "wifi"};
+	                                    "wifi", "mac"};
 	int k = -1;
 	for (int i = 0; i < IFACE_KEYS; i++)
 		if (strcmp(it->key, names[i]) == 0)
@@ -110,6 +110,10 @@ static void apply_item(struct iface_conf *c, const struct gr_item *it,
 		c->has_wifi = 1;
 		snprintf(c->wired_error, sizeof(c->wired_error),
 		         "line %d: wifi on a wired interface", it->line);
+		break;
+	case 4:
+		if (conf_parse_mac(it->value, &c->mac) < 0)
+			iface_fail(c, it->line, "invalid mac: %s", it->value);
 		break;
 	}
 }

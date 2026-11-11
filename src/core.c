@@ -298,6 +298,17 @@ static void sensor_sync(struct core_iface *ci, uint64_t now,
 	}
 }
 
+/* The profile decides; without it, the base of the interface; without that,
+ * the address of the hardware. */
+static struct mac_policy mac_of(const struct profile *p,
+                                const struct iface_conf *conf) {
+	if (p && p->mac.mode != MAC_UNSET)
+		return p->mac;
+	if (conf && conf->mac.mode != MAC_UNSET)
+		return conf->mac;
+	return (struct mac_policy){.mode = MAC_KEEP};
+}
+
 static void wpa_stop(struct core_iface *ci, uint64_t now, struct actions *out) {
 	if (ci->wst == W_RUNNING) {
 		ci->wst = W_STOPPING;
@@ -326,6 +337,7 @@ static void wpa_sync(struct core *c, struct core_iface *ci, uint64_t now,
 	if (!a)
 		return;
 	a->kind = K_WPA;
+	a->mac = mac_of(NULL, conf);
 	ci->wst = W_RUNNING;
 	ci->w_started_at = now;
 }
@@ -370,6 +382,14 @@ static void spawn_with(struct core_iface *ci, const struct profile *p,
 	conf = ci->has_conn_conf ? &ci->conn_conf : NULL;
 	snprintf(ci->profile, sizeof(ci->profile), "%s", p->name);
 	ci->pending[0] = '\0';
+
+	/* On a cable the address is set before anything is sent; on WiFi,
+	 * wpa_supplicant sets it when it joins the network. */
+	if (!ci->wireless) {
+		struct action *m = push(out, A_SET_MAC, ci);
+		if (m)
+			m->mac = mac_of(p, conf);
+	}
 
 	/* Nothing else brings a cable up; on WiFi, wpa_supplicant does. */
 	if (!ci->wireless && !ci->up) {
@@ -838,8 +858,14 @@ int core_wifi_off(const struct core *c, const char *ifname) {
 	return ci && wifi_off(c, ci);
 }
 
+static int same_mac(const struct mac_policy *a, const struct mac_policy *b) {
+	return a->mode == b->mode &&
+	       (a->mode != MAC_FIXED || memcmp(a->addr, b->addr, MAC_LEN) == 0);
+}
+
 static int same_but_dns(const struct profile *a, const struct profile *b) {
-	return strcmp(a->interface, b->interface) == 0 &&
+	return same_mac(&a->mac, &b->mac) &&
+	       strcmp(a->interface, b->interface) == 0 &&
 	       a->any_interface == b->any_interface && a->has_ssid == b->has_ssid &&
 	       a->ssid_len == b->ssid_len &&
 	       memcmp(a->ssid, b->ssid, a->ssid_len) == 0 &&
@@ -857,7 +883,9 @@ static int same_conf(const struct core_iface *ci,
 	static const struct iface_conf none;
 	const struct iface_conf *a = ci->has_conn_conf ? &ci->conn_conf : &none;
 	const struct iface_conf *b = conf ? conf : &none;
-	return a->has_metric == b->has_metric &&
+	/* The base of a WiFi interface is applied when wpa_supplicant starts. */
+	return (ci->wireless || same_mac(&a->mac, &b->mac)) &&
+	       a->has_metric == b->has_metric &&
 	       (!a->has_metric || a->metric == b->metric) &&
 	       a->has_table == b->has_table &&
 	       (!a->has_table || strcmp(a->table, b->table) == 0) &&

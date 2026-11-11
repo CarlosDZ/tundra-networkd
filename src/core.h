@@ -129,6 +129,7 @@ enum act_type {
 	A_SPAWN_PROBE,
 	A_SPAWN_WPA,
 	A_WPA_SYNC,
+	A_SET_MAC,
 	A_LINK_UP,
 	A_LINK_DOWN,
 	A_STATIC_APPLY,
@@ -159,6 +160,7 @@ struct action {
 	int level;
 	char kase[BLUEICE_TOKEN_MAX + 1];
 	char msg[160];
+	struct mac_policy mac;
 };
 
 struct actions {

@@ -45,7 +45,8 @@ the network.
 
 A profile has a `match` section (`interface`, and `ssid` and `security` for
 WiFi) and an `apply` section (`passphrase`, `address`, `gateway`, `dns`,
-`autoconnect`, `trusted`). The template documents every key. A profile with an
+`autoconnect`, `trusted` and the optional `mac`). The template documents every
+key. A profile with an
 error is rejected on its own; one with a passphrase must be mode `0600`.
 
 `interfaces` holds one block per interface:
@@ -58,12 +59,19 @@ enp8s0 {
 }
 wlp3s0 {
 	wifi = no
+	mac = random
 }
 ```
 
 `wifi = no` turns the WiFi of that interface off: no `wpa_supplicant`, the
 interface is kept down and `STATUS` shows it `off`. On a wired interface the key
 is an error of its block.
+
+`mac` is the address the interface shows: `keep` (the one of the hardware, the
+default), `random` (a new one for every connection, unicast and locally
+administered) or a fixed unicast address. In `interfaces` it is the base of the
+interface; in a profile it overrides the base for that network. See
+[MAC address](#mac-address).
 
 DNS goes to `/run/tundra/network/resolv.conf` and nowhere else: link
 `/etc/resolv.conf` to it to follow the active connections, ordered by metric,
@@ -76,6 +84,10 @@ three servers at most.
 - **Link**: a cable that is down is brought up with `tundra-ip link up` right
   before its connection starts; one with nothing to connect stays down. On WiFi,
   `wpa_supplicant` brings it up.
+- **MAC address**: on a cable, set with `tundra-ip link set mac` before the
+  link comes up and before anything is sent; on WiFi, see
+  [MAC address](#mac-address). If it cannot be set the connection does not
+  start, and is retried with backoff.
 - **DHCP**: one `tundra-dhcpc` per interface, with the `metric`, `table` and
   `carrier-grace` of `interfaces` and `lease-key <profile>`. Its output goes to
   the log as `dhcpc[<if>/<profile>]: …`.
@@ -105,6 +117,20 @@ three servers at most.
   releases it with `SIGUSR1` and starts another one; roaming within the same
   SSID touches nothing. A profile without `ssid` never starts on WiFi by
   itself.
+
+### MAC address
+
+| Where | `keep` | `random` | A fixed address |
+|-------|--------|----------|-----------------|
+| Cable, per connection | The hardware address is put back | A new one each time the connection starts | That one |
+| WiFi base (`interfaces`) | Hardware address | A new one each time `wpa_supplicant` starts; scans use random addresses too | Set before `wpa_supplicant` starts, used for scans and for networks without `mac` |
+| WiFi network (profile) | Hardware address | `wpa_supplicant` picks a new one for each connection to the network | `wpa_supplicant` joins with that one |
+
+On WiFi the base is applied when `wpa_supplicant` starts, so a reload that
+changes it takes effect the next time it does; the `mac` of a profile takes
+effect on reload, as the rest of the network. A virtual interface has no
+hardware address: `keep` leaves the one it has. The address is never sent in
+DHCP by any other means (tundra-dhcpc sends no hostname or client identifier).
 
 | tundra-dhcpc exits with | tundra-networkd |
 |-------------------------|-----------------|

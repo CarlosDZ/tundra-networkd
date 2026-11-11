@@ -14,6 +14,14 @@
 enum security { SEC_NONE, SEC_OPEN, SEC_WPA2, SEC_WPA3 };
 enum address_mode { ADDR_DHCP, ADDR_STATIC };
 enum dns_mode { DNS_LEASE, DNS_LIST, DNS_NONE };
+enum mac_mode { MAC_UNSET, MAC_KEEP, MAC_RANDOM, MAC_FIXED };
+
+#define MAC_LEN 6
+
+struct mac_policy {
+	enum mac_mode mode;
+	unsigned char addr[MAC_LEN];
+};
 
 struct profile {
 	char name[PROFILE_NAME_MAX + 1];
@@ -35,11 +43,13 @@ struct profile {
 	int ndns;
 	int autoconnect;
 	int trusted;
+	struct mac_policy mac;
 	int valid;
 	char error[CONF_ERR_MAX];
 };
 
 int conf_valid_ifname(const char *s);
+int conf_parse_mac(const char *s, struct mac_policy *out);
 int profile_name_from_file(const char *file, char name[PROFILE_NAME_MAX + 1]);
 int profile_parse(struct profile *p, const char *name, const char *text,
                   size_t len, int exposed);

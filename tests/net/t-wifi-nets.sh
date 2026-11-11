@@ -134,6 +134,31 @@ sleep 2
 check "and its association" on_profile 10-casa
 check "without associating again" test "$(associations)" -eq "$before"
 
+wmac() {
+	in_ns cat "/sys/class/net/$WIF/address"
+}
+
+check "a network without mac uses the address of the interface" net_is 10-casa mac_addr 0
+write_conf 10-casa.tnc <<END
+match {
+	interface = $WIF
+	ssid = "tnd-wpa3"
+	security = wpa3
+}
+apply {
+	passphrase = "correct horse wpa3"
+	address = dhcp
+	dns = lease
+	autoconnect = yes
+	trusted = no
+	mac = 02:12:34:56:78:9a
+}
+END
+check "RELOAD with a mac for that network" reply_is "OK" RELOAD
+eventually "the network gets a dedicated address" 5 net_is 10-casa mac_addr 3
+eventually "and joins again" 30 on_profile 10-casa
+check "with that mac" test "$(wmac)" = 02:12:34:56:78:9a
+
 check "a WiFi profile does not CONNECT on a cable" reply_is "ERROR profile does not match" CONNECT 50-cable "$IF"
 stop_daemon
 summary

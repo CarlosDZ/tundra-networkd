@@ -19,6 +19,7 @@ struct iface_conf {
 	unsigned int grace_ms;
 	int has_wifi;
 	int wifi;
+	struct mac_policy mac;
 	char wired_error[CONF_ERR_MAX];
 	int valid;
 	char error[CONF_ERR_MAX];

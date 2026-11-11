@@ -8,7 +8,7 @@
 
 #define WPA_BSSID_MAX 18
 #define WPA_STATE_MAX 32
-#define WPA_VARS_MAX 8
+#define WPA_VARS_MAX 10
 #define WPA_SCAN_MAX 48
 #define WPA_VAR_MAX (16 + 2 * PASSPHRASE_MAX + 1)
 
@@ -73,6 +73,9 @@ int wpactl_decode(const char *in, size_t len, unsigned char *out, size_t max,
 int wpactl_scan_results(const char *text, size_t len, struct wpa_bss *out,
                         int max);
 void wpactl_hex(const unsigned char *in, size_t len, char *out);
-void wpactl_network(const struct profile *p, struct wpa_network *w);
+/* base is the policy the interface had when wpa_supplicant started, perm the
+ * address of the hardware or NULL when unknown. */
+void wpactl_network(const struct profile *p, enum mac_mode base,
+                    const unsigned char *perm, struct wpa_network *w);
 
 #endif

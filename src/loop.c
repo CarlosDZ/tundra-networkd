@@ -3,6 +3,7 @@
 #include "alerts.h"
 #include "core.h"
 #include "files.h"
+#include "hwaddr.h"
 #include "lease.h"
 #include "leaseinfo.h"
 #include "link.h"
@@ -67,6 +68,9 @@ struct child {
 	char line[OUT_LINE_MAX];
 	size_t len;
 	struct wpa_conn wpa;
+	enum mac_mode base;
+	unsigned char perm[HWADDR_LEN];
+	int has_perm;
 };
 
 struct wpa_net {
@@ -104,6 +108,7 @@ struct daemon {
 	struct conn_view view[CORE_IFACES];
 	struct alert_store alerts;
 	struct wpa_table wnets[CORE_IFACES];
+	char mac_failed[CORE_IFACES];
 	int dirty;
 	int dns_written;
 	char dns[RESOLV_TEXT_MAX];
@@ -382,13 +387,25 @@ static struct child *new_child(struct daemon *d, const char *path,
 	return k;
 }
 
+/* A connection whose address could not be set does not start: it would show
+ * the one the user asked to hide. Read once per failure. */
+static int mac_blocked(struct daemon *d, const char *ifname) {
+	const struct core_iface *ci = core_find(&d->core, ifname);
+	if (!ci || !d->mac_failed[ci - d->core.ifs])
+		return 0;
+	d->mac_failed[ci - d->core.ifs] = 0;
+	return 1;
+}
+
 static void spawn_probe(struct daemon *d, const struct action *a) {
 	char addr[INET_ADDRSTRLEN];
 	inet_ntop(AF_INET, &a->addr, addr, sizeof(addr));
 	char *argv[] = {"tundra-blueice-arp", "probe", (char *)a->iface, addr,
 	                NULL};
-	struct child *k =
-	    new_child(d, TUNDRA_BLUEICE_ARP_PATH, argv, K_PROBE, a->iface, "");
+	struct child *k = mac_blocked(d, a->iface)
+	                      ? NULL
+	                      : new_child(d, TUNDRA_BLUEICE_ARP_PATH, argv, K_PROBE,
+	                                  a->iface, "");
 	if (!k) {
 		struct actions acts = {0};
 		fprintf(stderr, "networkd: %s: cannot launch tundra-blueice-arp\n",
@@ -466,8 +483,10 @@ static void spawn_dhcpc(struct daemon *d, const struct action *a) {
 	argv[n++] = (char *)a->profile;
 	argv[n] = NULL;
 
-	struct child *k =
-	    new_child(d, TUNDRA_DHCPC_PATH, argv, K_DHCPC, a->iface, a->profile);
+	struct child *k = mac_blocked(d, a->iface)
+	                      ? NULL
+	                      : new_child(d, TUNDRA_DHCPC_PATH, argv, K_DHCPC,
+	                                  a->iface, a->profile);
 	if (!k) {
 		struct actions acts = {0};
 		fprintf(stderr, "networkd: %s: cannot launch tundra-dhcpc\n", a->iface);
@@ -498,6 +517,13 @@ static void spawn_wpa(struct daemon *d, const struct action *a) {
 		wpa_failed(d, a->iface);
 		return;
 	}
+	/* The base goes on before wpa_supplicant sends anything, and is the
+	 * address it takes as the one of the interface. */
+	if (static_set_mac(a) < 0) {
+		fprintf(stderr, "networkd: %s: cannot set the mac\n", a->iface);
+		wpa_failed(d, a->iface);
+		return;
+	}
 	char *argv[] = {"wpa_supplicant",
 	                "-i",
 	                (char *)a->iface,
@@ -514,6 +540,8 @@ static void spawn_wpa(struct daemon *d, const struct action *a) {
 		wpa_failed(d, a->iface);
 		return;
 	}
+	k->base = a->mac.mode;
+	k->has_perm = hwaddr_permanent(a->iface, k->perm) == 0;
 	printf("networkd: %s: wpa_supplicant started (pid %d)\n", a->iface,
 	       (int)k->pid);
 }
@@ -611,7 +639,8 @@ static void wpa_sync_nets(struct daemon *d, struct child *k) {
 		int keep = 0;
 		for (int i = 0; i < n && !keep; i++)
 			if (strcmp(want[i].p->name, have->name) == 0) {
-				wpactl_network(want[i].p, &w);
+				wpactl_network(want[i].p, k->base, k->has_perm ? k->perm : NULL,
+				               &w);
 				keep = w.hash == have->hash;
 			}
 		if (keep) {
@@ -643,7 +672,7 @@ static void wpa_sync_nets(struct daemon *d, struct child *k) {
 			}
 			continue;
 		}
-		wpactl_network(want[i].p, &w);
+		wpactl_network(want[i].p, k->base, k->has_perm ? k->perm : NULL, &w);
 		int id = t->n < PROFILES_MAX ? wpa_add(k, &want[i], &w) : -1;
 		if (id < 0)
 			continue;
@@ -679,6 +708,10 @@ static void wpa_attach(struct daemon *d, struct child *k) {
 		memset(t, 0, sizeof(*t));
 	if (!wpa_ok(k, "SET sae_pwe 2"))
 		printf("networkd: %s: wpa_supplicant rejected sae_pwe\n", k->ifname);
+	/* With a random base, scans do not show the address either. */
+	if (!wpa_ok(k, "SET preassoc_mac_addr %d", k->base == MAC_RANDOM))
+		printf("networkd: %s: wpa_supplicant rejected preassoc_mac_addr\n",
+		       k->ifname);
 	wpa_sync_nets(d, k);
 }
 
@@ -751,11 +784,24 @@ static void execute(struct daemon *d, struct actions *acts) {
 			if ((k = running_child(d, a->iface, K_WPA)))
 				wpa_sync_nets(d, k);
 			break;
-		case A_LINK_UP:
+		case A_SET_MAC: {
+			const struct core_iface *ci = core_find(&d->core, a->iface);
+			if (static_set_mac(a) < 0 && ci) {
+				printf("networkd: %s: cannot set the mac, not connecting\n",
+				       a->iface);
+				d->mac_failed[ci - d->core.ifs] = 1;
+			}
+			break;
+		}
+		case A_LINK_UP: {
+			const struct core_iface *ci = core_find(&d->core, a->iface);
+			if (ci && d->mac_failed[ci - d->core.ifs])
+				break;
 			if (static_link_up(a) < 0)
 				printf("networkd: %s: cannot bring the interface up\n",
 				       a->iface);
 			break;
+		}
 		case A_LINK_DOWN:
 			if (static_link_down(a) < 0)
 				printf("networkd: %s: cannot bring the interface down\n",
@@ -763,7 +809,7 @@ static void execute(struct daemon *d, struct actions *acts) {
 			break;
 		case A_STATIC_APPLY: {
 			struct actions next = {0};
-			int rc = static_apply(a);
+			int rc = mac_blocked(d, a->iface) ? STATIC_FAIL : static_apply(a);
 			core_static_result(&d->core, a->iface, rc, now_ms(), &next);
 			execute(d, &next);
 			d->dirty = 1;

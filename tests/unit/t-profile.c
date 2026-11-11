@@ -228,6 +228,37 @@ static void test_values(void) {
 	      "an invalid interface name");
 }
 
+static void test_mac(void) {
+	static const unsigned char fixed[MAC_LEN] = {0x02, 0x12, 0x34,
+	                                             0x56, 0x78, 0x9a};
+	CHECK(wired(" address = dhcp\n" WIRED_REST) == 0 && p.mac.mode == MAC_UNSET,
+	      "without mac the profile follows the interface");
+	CHECK(wired(" address = dhcp\n mac = keep\n" WIRED_REST) == 0 &&
+	          p.mac.mode == MAC_KEEP,
+	      "mac = keep");
+	CHECK(wired(" address = dhcp\n mac = random\n" WIRED_REST) == 0 &&
+	          p.mac.mode == MAC_RANDOM,
+	      "mac = random");
+	CHECK(
+	    wired(" address = dhcp\n mac = 02:12:34:56:78:9A\n" WIRED_REST) == 0 &&
+	        p.mac.mode == MAC_FIXED && memcmp(p.mac.addr, fixed, MAC_LEN) == 0,
+	    "a fixed mac");
+	CHECK(wired(" address = dhcp\n mac = 01:12:34:56:78:9a\n" WIRED_REST) < 0 &&
+	          has("invalid mac"),
+	      "a multicast mac");
+	CHECK(wired(" address = dhcp\n mac = 00:00:00:00:00:00\n" WIRED_REST) < 0,
+	      "the zero mac");
+	CHECK(wired(" address = dhcp\n mac = 02:12:34:56:78\n" WIRED_REST) < 0 &&
+	          wired(" address = dhcp\n mac = 02-12-34-56-78-9a\n" WIRED_REST) <
+	              0 &&
+	          wired(" address = dhcp\n mac = 02:12:34:56:78:9g\n" WIRED_REST) <
+	              0 &&
+	          wired(" address = dhcp\n mac = stable\n" WIRED_REST) < 0,
+	      "a short one, other separators, a bad digit and an unknown word");
+	CHECK(wired(" address = dhcp\n mac = \"random\"\n" WIRED_REST) < 0,
+	      "a quoted mac");
+}
+
 static void test_exposure(void) {
 	CHECK(profile_parse(&p, "10-casa", WIFI_MATCH WIFI_APPLY,
 	                    strlen(WIFI_MATCH WIFI_APPLY), 1) < 0 &&
@@ -263,6 +294,7 @@ int main(void) {
 	test_quoting();
 	test_wifi();
 	test_values();
+	test_mac();
 	test_exposure();
 	test_names();
 	return test_summary();

@@ -76,12 +76,28 @@ eventually "STATUS shows it idle" 3 status_has "iface $IF state idle profile - a
 
 check "a line too long closes the connection" sh -c "[ \"\$(printf '%0300d\n' 0 | $TOOLS/ctl '$SOCK')\" = 'ERROR line too long' ]"
 check "several commands in one write" sh -c "[ \"\$(printf 'ALERTS\r\nALERTS\n' | $TOOLS/ctl '$SOCK' | tr '\n' ' ')\" = 'OK OK ' ]"
+# A client of an earlier check may still hold its slot when these arrive, and
+# then the server rightly turns one of them away: top up until 15 stay.
 pids=
-n=0
-while [ "$n" -lt 15 ]; do
-	"$TOOLS/ctl" -f "$SOCK" SUBSCRIBE >/dev/null 2>&1 &
-	pids="$pids $!"
-	n=$((n + 1))
+tries=0
+while [ "$tries" -lt 20 ]; do
+	live=
+	n=0
+	for p in $pids; do
+		if kill -0 "$p" 2>/dev/null; then
+			live="$live $p"
+			n=$((n + 1))
+		fi
+	done
+	pids=$live
+	[ "$n" -eq 15 ] && break
+	while [ "$n" -lt 15 ]; do
+		"$TOOLS/ctl" -f "$SOCK" SUBSCRIBE >/dev/null 2>&1 &
+		pids="$pids $!"
+		n=$((n + 1))
+	done
+	sleep 0.2
+	tries=$((tries + 1))
 done
 _failed=$FAIL
 eventually "a seventeenth client is turned away" 3 reply_is "ERROR too many clients" ALERTS

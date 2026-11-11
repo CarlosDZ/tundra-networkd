@@ -272,9 +272,46 @@ static void add_var(struct wpa_network *w, int optional, const char *fmt,
 	w->optional[w->n++] = optional;
 }
 
+static void add_fixed(struct wpa_network *w, const unsigned char *mac) {
+	char text[18];
+	snprintf(text, sizeof(text), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0],
+	         mac[1], mac[2], mac[3], mac[4], mac[5]);
+	add_var(w, 0, "mac_value %s", text);
+	add_var(w, 0, "mac_addr %s", "3");
+}
+
+/* mac_addr of wpa_supplicant: 0 the address it found on the interface, which
+ * tundra-networkd set to the base; 1 a random one per connection; 3 the one
+ * in mac_value. */
+static void add_mac(struct wpa_network *w, const struct profile *p,
+                    enum mac_mode base, const unsigned char *perm) {
+	switch (p->mac.mode) {
+	case MAC_FIXED:
+		add_fixed(w, p->mac.addr);
+		return;
+	case MAC_RANDOM:
+		add_var(w, 0, "mac_addr %s", "1");
+		return;
+	case MAC_KEEP:
+		if (base != MAC_KEEP && base != MAC_UNSET && perm) {
+			add_fixed(w, perm);
+			return;
+		}
+		break;
+	case MAC_UNSET:
+		if (base == MAC_RANDOM) {
+			add_var(w, 0, "mac_addr %s", "1");
+			return;
+		}
+		break;
+	}
+	add_var(w, 0, "mac_addr %s", "0");
+}
+
 /* The password goes in hex, like the SSID, so no byte needs quoting. The
  * WPA2 passphrase stays quoted: psk takes hex only as the derived key. */
-void wpactl_network(const struct profile *p, struct wpa_network *w) {
+void wpactl_network(const struct profile *p, enum mac_mode base,
+                    const unsigned char *perm, struct wpa_network *w) {
 	char hex[2 * PASSPHRASE_MAX + 1];
 	memset(w, 0, sizeof(*w));
 	wpactl_hex(p->ssid, p->ssid_len, hex);
@@ -303,6 +340,7 @@ void wpactl_network(const struct profile *p, struct wpa_network *w) {
 		add_var(w, 0, "key_mgmt %s", "NONE");
 		break;
 	}
+	add_mac(w, p, base, perm);
 	uint64_t h = 0xcbf29ce484222325ULL;
 	for (int i = 0; i < w->n; i++)
 		for (const char *c = w->vars[i];; c++) {

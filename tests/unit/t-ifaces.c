@@ -80,5 +80,15 @@ int main(void) {
 
 	parse("");
 	CHECK(f.valid && f.n == 0, "an empty file is valid");
+	parse("enp8s0 {\n mac = random\n}\nwlp3s0 {\n mac = 02:12:34:56:78:9a\n}\n"
+	      "enp9s0 {\n metric = 1\n}\n");
+	CHECK(get("enp8s0")->valid && get("enp8s0")->mac.mode == MAC_RANDOM &&
+	          get("wlp3s0")->mac.mode == MAC_FIXED &&
+	          get("wlp3s0")->mac.addr[5] == 0x9a &&
+	          get("enp9s0")->mac.mode == MAC_UNSET,
+	      "the base mac of an interface");
+	parse("enp8s0 {\n mac = ff:ff:ff:ff:ff:ff\n}\n");
+	CHECK(!get("enp8s0")->valid && strstr(get("enp8s0")->error, "invalid mac"),
+	      "an invalid base mac spoils that block");
 	return test_summary();
 }

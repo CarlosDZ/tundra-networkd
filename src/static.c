@@ -1,4 +1,5 @@
 #include "static.h"
+#include "hwaddr.h"
 #include "spawn.h"
 
 #include <arpa/inet.h>
@@ -159,6 +160,41 @@ int static_apply(const struct action *a) {
 		return r;
 	if ((r = apply_all(a, &s)) < 0)
 		static_remove(a);
+	return r;
+}
+
+/* 0 when the interface ends with the address asked for. keep on an interface
+ * without a hardware address leaves the one it has. */
+int static_set_mac(const struct action *a) {
+	unsigned char want[HWADDR_LEN], now[HWADDR_LEN];
+	char text[HWADDR_TEXT];
+	switch (a->mac.mode) {
+	case MAC_FIXED:
+		memcpy(want, a->mac.addr, HWADDR_LEN);
+		break;
+	case MAC_RANDOM:
+		if (hwaddr_random(want) < 0)
+			return STATIC_FAIL;
+		break;
+	case MAC_KEEP:
+	case MAC_UNSET:
+		if (hwaddr_permanent(a->iface, want) < 0)
+			return 0;
+		break;
+	}
+	if (hwaddr_current(a->iface, now) == 0 &&
+	    memcmp(now, want, HWADDR_LEN) == 0)
+		return 0;
+	hwaddr_format(want, text);
+	int up = hwaddr_is_up(a->iface) > 0;
+	int r;
+	if (up && (r = tip(a->iface, 0, "link", "down", a->iface, NULL)) < 0)
+		return r;
+	r = tip(a->iface, 0, "link", "set", "mac", text, "on", a->iface, NULL);
+	if (up && tip(a->iface, 0, "link", "up", a->iface, NULL) < 0 && r == 0)
+		r = STATIC_FAIL;
+	if (r == 0)
+		printf("networkd: %s: mac set to %s\n", a->iface, text);
 	return r;
 }
 

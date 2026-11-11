@@ -22,6 +22,10 @@
 #                or none
 #   autoconnect  yes: connect as soon as it matches. no: only on CONNECT
 #   trusted      yes or no. tundra-blueice can lower it after an alert
+#   mac          optional: keep (the hardware address), random (a new one
+#                for every connection) or a fixed address such as
+#                02:12:34:56:78:9a. Without it, the mac of the interface in
+#                /etc/tundra/network/interfaces, or keep
 #
 # Wired, DHCP, own DNS servers:
 #

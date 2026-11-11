@@ -19,6 +19,7 @@ enum {
 	KEY_DNS,
 	KEY_AUTOCONNECT,
 	KEY_TRUSTED,
+	KEY_MAC,
 	KEY_COUNT
 };
 
@@ -36,6 +37,7 @@ static const struct {
     [KEY_DNS] = {"dns", S_APPLY, K_TOKEN},
     [KEY_AUTOCONNECT] = {"autoconnect", S_APPLY, K_TOKEN},
     [KEY_TRUSTED] = {"trusted", S_APPLY, K_TOKEN},
+    [KEY_MAC] = {"mac", S_APPLY, K_TOKEN},
 };
 
 static const char *section_name(enum section s) {
@@ -54,6 +56,43 @@ static int pr_fail(struct profile *p, int line, const char *fmt, ...) {
 		snprintf(p->error, sizeof(p->error), "%s", msg);
 	p->valid = 0;
 	return -1;
+}
+
+static int hexdigit(char c) {
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/* keep, random or a unicast address that is not all zeros. */
+int conf_parse_mac(const char *s, struct mac_policy *out) {
+	memset(out, 0, sizeof(*out));
+	if (strcmp(s, "keep") == 0) {
+		out->mode = MAC_KEEP;
+		return 0;
+	}
+	if (strcmp(s, "random") == 0) {
+		out->mode = MAC_RANDOM;
+		return 0;
+	}
+	if (strlen(s) != 3 * MAC_LEN - 1)
+		return -1;
+	int any = 0;
+	for (int i = 0; i < MAC_LEN; i++) {
+		int hi = hexdigit(s[3 * i]), lo = hexdigit(s[3 * i + 1]);
+		if (hi < 0 || lo < 0 || (i < MAC_LEN - 1 && s[3 * i + 2] != ':'))
+			return -1;
+		out->addr[i] = (unsigned char)(hi << 4 | lo);
+		any |= out->addr[i];
+	}
+	if (!any || (out->addr[0] & 1))
+		return -1;
+	out->mode = MAC_FIXED;
+	return 0;
 }
 
 int conf_valid_ifname(const char *s) {
@@ -331,6 +370,8 @@ static int check_values(struct profile *p,
 	if (parse_bool(p, seen[KEY_AUTOCONNECT], &p->autoconnect) < 0 ||
 	    parse_bool(p, seen[KEY_TRUSTED], &p->trusted) < 0)
 		return -1;
+	if ((it = seen[KEY_MAC]) && conf_parse_mac(it->value, &p->mac) < 0)
+		return pr_fail(p, it->line, "invalid mac: %s", it->value);
 	return 0;
 }
 

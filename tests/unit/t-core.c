@@ -1361,6 +1361,78 @@ static void test_link_up(void) {
 	      "on WiFi wpa_supplicant brings it up, not networkd");
 }
 
+static void test_mac(void) {
+	reset("");
+	add("10-casa", "tnd0", AUTO);
+	core_link(&c, "tnd0", LINK_PHYSICAL, 0, &out);
+	CHECK(count(A_SET_MAC) == 1 && find_act(A_SET_MAC)->mac.mode == MAC_KEEP &&
+	          index_of(A_SET_MAC) < index_of(A_LINK_UP) &&
+	          index_of(A_SET_MAC) < index_of(A_SPAWN_DHCPC),
+	      "a cable gets its address before it comes up: the hardware one");
+
+	reset("tnd0 {\n mac = random\n}\n");
+	add("10-casa", "tnd0", AUTO);
+	core_link(&c, "tnd0", LINK_PHYSICAL | LINK_UP, 0, &out);
+	CHECK(count(A_SET_MAC) == 1 && find_act(A_SET_MAC)->mac.mode == MAC_RANDOM,
+	      "without mac in the profile, the base of the interface");
+
+	reset("tnd0 {\n mac = random\n}\n");
+	add("10-casa", "tnd0", AUTO " mac = 02:12:34:56:78:9a\n");
+	core_link(&c, "tnd0", LINK_PHYSICAL, 0, &out);
+	CHECK(find_act(A_SET_MAC)->mac.mode == MAC_FIXED &&
+	          find_act(A_SET_MAC)->mac.addr[5] == 0x9a,
+	      "the profile wins over the base");
+
+	reset("tnd0 {\n mac = 02:12:34:56:78:9a\n}\n");
+	add("10-casa", "tnd0", AUTO " mac = keep\n");
+	core_link(&c, "tnd0", LINK_PHYSICAL, 0, &out);
+	CHECK(find_act(A_SET_MAC)->mac.mode == MAC_KEEP,
+	      "mac = keep in the profile undoes a fixed base");
+
+	reset("");
+	add("10-fixed", "tnd0", STATIC " mac = random\n");
+	core_link(&c, "tnd0", LINK_PHYSICAL, 0, &out);
+	CHECK(count(A_SET_MAC) == 1 &&
+	          index_of(A_SET_MAC) < index_of(A_SPAWN_PROBE),
+	      "a static address is probed with the new address, set once");
+
+	reset("wl0 {\n mac = random\n}\n");
+	add("10-a", "wl0", AUTO);
+	core_link(&c, "wl0", WL, 0, &out);
+	CHECK(find_act(A_SPAWN_WPA) &&
+	          find_act(A_SPAWN_WPA)->mac.mode == MAC_RANDOM,
+	      "wpa_supplicant starts with the base of the interface");
+	core_wifi_assoc(&c, "wl0", "", (const unsigned char *)"red", 3,
+	                "02:00:00:00:00:00", 5, &out);
+	CHECK(count(A_SPAWN_DHCPC) == 1 && count(A_SET_MAC) == 0,
+	      "on WiFi the address of a network is wpa_supplicant's job");
+
+	reset("");
+	add("10-a", "wl0", AUTO);
+	core_link(&c, "wl0", WL, 0, &out);
+	CHECK(find_act(A_SPAWN_WPA)->mac.mode == MAC_KEEP,
+	      "and without a base, the hardware address");
+
+	cur = 0;
+	build(&k[0], "", "tnd0", DNS9);
+	core_init(&c, &k[0]);
+	out.n = 0;
+	core_link(&c, "tnd0", LINK_PHYSICAL | LINK_UP, 0, &out);
+	reload("", "tnd0", DNS9 " mac = random\n", 1000);
+	CHECK(count(A_SIGNAL) == 1 && logged("profile 10-a changed, reconnecting"),
+	      "a new mac in the profile reconnects");
+	core_child_exit(&c, "tnd0", EXITED(0), 1100, &out);
+	CHECK(count(A_SET_MAC) == 1 && find_act(A_SET_MAC)->mac.mode == MAC_RANDOM,
+	      "with it");
+	reload("tnd0 {\n mac = 02:12:34:56:78:9a\n}\n", "tnd0",
+	       DNS9 " mac = random\n", 2000);
+	CHECK(count(A_SIGNAL) == 1, "a new base on a cable reconnects");
+	core_child_exit(&c, "tnd0", EXITED(0), 2100, &out);
+	reload("tnd0 {\n mac = 02:12:34:56:78:9b\n}\n", "tnd0",
+	       DNS9 " mac = random\n", 3000);
+	CHECK(count(A_SIGNAL) == 1, "and so does another fixed base");
+}
+
 int main(void) {
 	test_autoconnect();
 	test_managed();
@@ -1381,5 +1453,6 @@ int main(void) {
 	test_wifi_assoc();
 	test_wifi_alerts();
 	test_link_up();
+	test_mac();
 	return test_summary();
 }
