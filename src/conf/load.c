@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define TEMPLATE "000-template.tnc"
+#define TEMPLATE PROFILE_TEMPLATE ".tnc"
 
 static int read_file(int dirfd, const char *file, char *buf, size_t size,
                      size_t *len, struct stat *st, char err[CONF_ERR_MAX]) {
@@ -71,6 +71,14 @@ static int by_name(const void *a, const void *b) {
 	return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
+/* The group may read the credentials only when it is the one of the daemon:
+ * 0640 root:tundra-network for a file written by hand. */
+static int exposed(const struct stat *st, gid_t own) {
+	if (st->st_mode & 007)
+		return 1;
+	return (st->st_mode & 070) && st->st_gid != own;
+}
+
 static void load_profile(int dirfd, const char *file, struct profile *p) {
 	static char buf[CONF_FILE_MAX];
 	char name[PROFILE_NAME_MAX + 1];
@@ -89,7 +97,7 @@ static void load_profile(int dirfd, const char *file, struct profile *p) {
 		snprintf(p->error, sizeof(p->error), "%s", err);
 		return;
 	}
-	profile_parse(p, name, buf, len, (st.st_mode & 077) != 0);
+	profile_parse(p, name, buf, len, exposed(&st, getegid()));
 }
 
 int conf_load(const char *dir, struct config *c) {

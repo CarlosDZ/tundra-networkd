@@ -60,8 +60,23 @@ int main(void) {
 	chmod(dir, 0700);
 	put("15-wifi.tnc", wifi, 0640);
 	conf_load(dir, &c);
+	CHECK(c.profiles[1].valid,
+	      "credentials readable by the group of the daemon are accepted");
+	put("15-wifi.tnc", wifi, 0604);
+	conf_load(dir, &c);
 	CHECK(!c.profiles[1].valid && strstr(c.profiles[1].error, "readable"),
-	      "credentials readable by the group are rejected");
+	      "credentials readable by others are rejected");
+	struct stat st = {.st_mode = S_IFREG | 0600, .st_gid = 7};
+	CHECK(!exposed(&st, 7) && !exposed(&st, 8), "0600 is not exposed");
+	st.st_mode = S_IFREG | 0640;
+	CHECK(!exposed(&st, 7) && exposed(&st, 8),
+	      "0640 is exposed unless the group is the one of the daemon");
+	st.st_mode = S_IFREG | 0660;
+	CHECK(!exposed(&st, 7) && exposed(&st, 8), "and so is 0660");
+	st.st_mode = S_IFREG | 0620;
+	CHECK(exposed(&st, 8), "a file another group can write is exposed");
+	st.st_mode = S_IFREG | 0601;
+	CHECK(exposed(&st, 7), "any access of others is exposed");
 
 	put("interfaces", "enp8s0 {\n metric = 100\n}\n", 0644);
 	conf_load(dir, &c);

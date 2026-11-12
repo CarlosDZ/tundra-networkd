@@ -9,35 +9,21 @@
 enum section { S_MATCH, S_APPLY };
 enum kind { K_TOKEN, K_TEXT };
 
-enum {
-	KEY_INTERFACE,
-	KEY_SSID,
-	KEY_SECURITY,
-	KEY_PASSPHRASE,
-	KEY_ADDRESS,
-	KEY_GATEWAY,
-	KEY_DNS,
-	KEY_AUTOCONNECT,
-	KEY_TRUSTED,
-	KEY_MAC,
-	KEY_COUNT
-};
-
 static const struct {
 	const char *name;
 	enum section sec;
 	enum kind kind;
-} keys[KEY_COUNT] = {
-    [KEY_INTERFACE] = {"interface", S_MATCH, K_TOKEN},
-    [KEY_SSID] = {"ssid", S_MATCH, K_TEXT},
-    [KEY_SECURITY] = {"security", S_MATCH, K_TOKEN},
-    [KEY_PASSPHRASE] = {"passphrase", S_APPLY, K_TEXT},
-    [KEY_ADDRESS] = {"address", S_APPLY, K_TOKEN},
-    [KEY_GATEWAY] = {"gateway", S_APPLY, K_TOKEN},
-    [KEY_DNS] = {"dns", S_APPLY, K_TOKEN},
-    [KEY_AUTOCONNECT] = {"autoconnect", S_APPLY, K_TOKEN},
-    [KEY_TRUSTED] = {"trusted", S_APPLY, K_TOKEN},
-    [KEY_MAC] = {"mac", S_APPLY, K_TOKEN},
+} keys[PKEY_COUNT] = {
+    [PKEY_INTERFACE] = {"interface", S_MATCH, K_TOKEN},
+    [PKEY_SSID] = {"ssid", S_MATCH, K_TEXT},
+    [PKEY_SECURITY] = {"security", S_MATCH, K_TOKEN},
+    [PKEY_PASSPHRASE] = {"passphrase", S_APPLY, K_TEXT},
+    [PKEY_ADDRESS] = {"address", S_APPLY, K_TOKEN},
+    [PKEY_GATEWAY] = {"gateway", S_APPLY, K_TOKEN},
+    [PKEY_DNS] = {"dns", S_APPLY, K_TOKEN},
+    [PKEY_AUTOCONNECT] = {"autoconnect", S_APPLY, K_TOKEN},
+    [PKEY_TRUSTED] = {"trusted", S_APPLY, K_TOKEN},
+    [PKEY_MAC] = {"mac", S_APPLY, K_TOKEN},
 };
 
 static const char *section_name(enum section s) {
@@ -106,19 +92,29 @@ int conf_valid_ifname(const char *s) {
 	return 1;
 }
 
+static int valid_name(const char *s, size_t n) {
+	if (n == 0 || n > PROFILE_NAME_MAX || s[0] == '.')
+		return 0;
+	for (size_t i = 0; i < n; i++) {
+		char c = s[i];
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
+			return 0;
+	}
+	return 1;
+}
+
+int profile_valid_name(const char *name) {
+	return valid_name(name, strlen(name));
+}
+
 int profile_name_from_file(const char *file, char name[PROFILE_NAME_MAX + 1]) {
 	size_t n = strlen(file);
 	if (n <= 4 || strcmp(file + n - 4, ".tnc") != 0)
 		return -1;
 	n -= 4;
-	if (n > PROFILE_NAME_MAX || file[0] == '.')
+	if (!valid_name(file, n))
 		return -2;
-	for (size_t i = 0; i < n; i++) {
-		char c = file[i];
-		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-		      (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
-			return -2;
-	}
 	memcpy(name, file, n);
 	name[n] = '\0';
 	return 0;
@@ -252,15 +248,15 @@ static int parse_passphrase(struct profile *p, const struct tconf_item *it) {
 	return 0;
 }
 
-static int find_key(const char *name) {
-	for (int k = 0; k < KEY_COUNT; k++)
+int profile_key(const char *name) {
+	for (int k = 0; k < PKEY_COUNT; k++)
 		if (strcmp(keys[k].name, name) == 0)
 			return k;
 	return -1;
 }
 
 static int check_structure(struct profile *p, const struct tconf *g,
-                           const struct tconf_item *seen[KEY_COUNT]) {
+                           const struct tconf_item *seen[PKEY_COUNT]) {
 	int block_sec[TCONF_BLOCKS_MAX];
 	int have[2] = {0, 0};
 
@@ -284,7 +280,7 @@ static int check_structure(struct profile *p, const struct tconf *g,
 		const struct tconf_item *it = &g->items[i];
 		if (it->block < 0)
 			return pr_fail(p, it->line, "%s outside a section", it->key);
-		int k = find_key(it->key);
+		int k = profile_key(it->key);
 		if (k < 0)
 			return pr_fail(p, it->line, "unknown key %s", it->key);
 		if ((int)keys[k].sec != block_sec[it->block])
@@ -301,9 +297,9 @@ static int check_structure(struct profile *p, const struct tconf *g,
 	return 0;
 }
 
-static const char *missing(const struct tconf_item *seen[KEY_COUNT]) {
-	static const int required[] = {KEY_INTERFACE, KEY_ADDRESS, KEY_DNS,
-	                               KEY_AUTOCONNECT, KEY_TRUSTED};
+static const char *missing(const struct tconf_item *seen[PKEY_COUNT]) {
+	static const int required[] = {PKEY_INTERFACE, PKEY_ADDRESS, PKEY_DNS,
+	                               PKEY_AUTOCONNECT, PKEY_TRUSTED};
 	for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++)
 		if (!seen[required[i]])
 			return keys[required[i]].name;
@@ -311,14 +307,14 @@ static const char *missing(const struct tconf_item *seen[KEY_COUNT]) {
 }
 
 static int check_values(struct profile *p,
-                        const struct tconf_item *seen[KEY_COUNT]) {
+                        const struct tconf_item *seen[PKEY_COUNT]) {
 	const struct tconf_item *it;
 
 	const char *absent = missing(seen);
 	if (absent)
 		return pr_fail(p, 0, "missing %s", absent);
 
-	it = seen[KEY_INTERFACE];
+	it = seen[PKEY_INTERFACE];
 	if (strcmp(it->value, "*") == 0)
 		p->any_interface = 1;
 	else if (conf_valid_ifname(it->value))
@@ -327,7 +323,7 @@ static int check_values(struct profile *p,
 	else
 		return pr_fail(p, it->line, "invalid interface: %s", it->value);
 
-	if ((it = seen[KEY_SSID])) {
+	if ((it = seen[PKEY_SSID])) {
 		if (it->len == 0 || it->len > SSID_MAX)
 			return pr_fail(p, it->line, "ssid must have 1 to %d bytes",
 			               SSID_MAX);
@@ -336,7 +332,7 @@ static int check_values(struct profile *p,
 		p->has_ssid = 1;
 	}
 
-	it = seen[KEY_SECURITY];
+	it = seen[PKEY_SECURITY];
 	if (p->has_ssid && !it)
 		return pr_fail(p, 0, "missing security");
 	if (!p->has_ssid && it)
@@ -352,7 +348,7 @@ static int check_values(struct profile *p,
 			return pr_fail(p, it->line, "invalid security: %s", it->value);
 	}
 
-	it = seen[KEY_PASSPHRASE];
+	it = seen[PKEY_PASSPHRASE];
 	int needs = p->security == SEC_WPA2 || p->security == SEC_WPA3;
 	if (needs && !it)
 		return pr_fail(p, 0, "missing passphrase");
@@ -362,16 +358,16 @@ static int check_values(struct profile *p,
 	if (it && parse_passphrase(p, it) < 0)
 		return -1;
 
-	if (parse_address(p, seen[KEY_ADDRESS]) < 0)
+	if (parse_address(p, seen[PKEY_ADDRESS]) < 0)
 		return -1;
-	if (seen[KEY_GATEWAY] && parse_gateway(p, seen[KEY_GATEWAY]) < 0)
+	if (seen[PKEY_GATEWAY] && parse_gateway(p, seen[PKEY_GATEWAY]) < 0)
 		return -1;
-	if (parse_dns(p, seen[KEY_DNS]) < 0)
+	if (parse_dns(p, seen[PKEY_DNS]) < 0)
 		return -1;
-	if (parse_bool(p, seen[KEY_AUTOCONNECT], &p->autoconnect) < 0 ||
-	    parse_bool(p, seen[KEY_TRUSTED], &p->trusted) < 0)
+	if (parse_bool(p, seen[PKEY_AUTOCONNECT], &p->autoconnect) < 0 ||
+	    parse_bool(p, seen[PKEY_TRUSTED], &p->trusted) < 0)
 		return -1;
-	if ((it = seen[KEY_MAC]) && conf_parse_mac(it->value, &p->mac) < 0)
+	if ((it = seen[PKEY_MAC]) && conf_parse_mac(it->value, &p->mac) < 0)
 		return pr_fail(p, it->line, "invalid mac: %s", it->value);
 	return 0;
 }
@@ -379,7 +375,7 @@ static int check_values(struct profile *p,
 int profile_parse(struct profile *p, const char *name, const char *text,
                   size_t len, int exposed) {
 	static struct tconf g;
-	const struct tconf_item *seen[KEY_COUNT] = {0};
+	const struct tconf_item *seen[PKEY_COUNT] = {0};
 
 	memset(p, 0, sizeof(*p));
 	snprintf(p->name, sizeof(p->name), "%s", name);
@@ -389,8 +385,129 @@ int profile_parse(struct profile *p, const char *name, const char *text,
 	if (check_structure(p, &g, seen) < 0 || check_values(p, seen) < 0)
 		return -1;
 	if (exposed && p->has_passphrase)
-		return pr_fail(p, 0,
-		               "credentials in a file readable by group or others");
+		return pr_fail(
+		    p, 0,
+		    "credentials in a file readable by another group or by others");
 	p->valid = 1;
 	return 0;
+}
+
+/* A request without passphrase for a network that needs one keeps the stored
+ * one: no client can read it to send it back. */
+void profile_draft_keep(struct profile_draft *d, const struct profile *old) {
+	struct draft_key *pass = &d->key[PKEY_PASSPHRASE];
+	const char *sec = d->key[PKEY_SECURITY].value;
+	const struct draft_key *ssid = &d->key[PKEY_SSID];
+	if (pass->named || !old || !old->valid || !old->has_passphrase)
+		return;
+	/* A passphrase belongs to its network: it is not carried to another. */
+	if (ssid->len != old->ssid_len ||
+	    memcmp(ssid->value, old->ssid, ssid->len) != 0)
+		return;
+	if (strcmp(sec, "wpa2") != 0 && strcmp(sec, "wpa3") != 0)
+		return;
+	pass->len = strlen(old->passphrase);
+	memcpy(pass->value, old->passphrase, pass->len + 1);
+	pass->named = 1;
+}
+
+struct text {
+	char *buf;
+	size_t size, len;
+	int full;
+};
+
+static void text_add(struct text *t, const char *s, size_t n) {
+	if (t->full || n >= t->size - t->len) {
+		t->full = 1;
+		return;
+	}
+	memcpy(t->buf + t->len, s, n);
+	t->len += n;
+	t->buf[t->len] = '\0';
+}
+
+static void text_str(struct text *t, const char *s) {
+	text_add(t, s, strlen(s));
+}
+
+/* Bytes of 0x80 and above stay as they are: a passphrase of 128 bytes with
+ * every one escaped would not fit the line limit of the grammar. */
+static void text_quoted(struct text *t, const struct draft_key *k) {
+	static const char hex[] = "0123456789abcdef";
+	text_str(t, "\"");
+	for (size_t i = 0; i < k->len; i++) {
+		unsigned char c = (unsigned char)k->value[i];
+		if (c == '"' || c == '\\') {
+			char esc[2] = {'\\', (char)c};
+			text_add(t, esc, 2);
+		} else if (c < 0x20 || c == 0x7f) {
+			char esc[4] = {'\\', 'x', hex[c >> 4], hex[c & 15]};
+			text_add(t, esc, 4);
+		} else {
+			text_add(t, k->value + i, 1);
+		}
+	}
+	text_str(t, "\"");
+}
+
+/* A bare value ends at a '#' or at the line and cannot hold a quote: any of
+ * them would turn one value into other lines of the file. */
+static int bare_ok(const struct draft_key *k) {
+	for (size_t i = 0; i < k->len; i++) {
+		unsigned char c = (unsigned char)k->value[i];
+		if (c <= 0x20 || c > 0x7e || c == '#' || c == '"')
+			return 0;
+	}
+	return 1;
+}
+
+static int text_section(struct profile *p, struct text *t,
+                        const struct profile_draft *d, enum section sec) {
+	text_str(t, section_name(sec));
+	text_str(t, " {\n");
+	for (int k = 0; k < PKEY_COUNT; k++) {
+		const struct draft_key *v = &d->key[k];
+		if (keys[k].sec != sec || !v->len)
+			continue;
+		if (keys[k].kind == K_TOKEN && !bare_ok(v))
+			return pr_fail(p, 0, "invalid value for %s", keys[k].name);
+		text_str(t, "\t");
+		text_str(t, keys[k].name);
+		text_str(t, " = ");
+		if (keys[k].kind == K_TEXT)
+			text_quoted(t, v);
+		else
+			text_add(t, v->value, v->len);
+		text_str(t, "\n");
+	}
+	text_str(t, "}\n");
+	return 0;
+}
+
+/* Writes the .tnc of a draft and checks it as a loaded file is checked. The
+ * length of the text, or -1 with the reason in p->error. */
+int profile_build(struct profile *p, const char *name,
+                  const struct profile_draft *d, char *text, size_t size) {
+	struct text t = {.buf = text, .size = size};
+	memset(p, 0, sizeof(*p));
+	snprintf(p->name, sizeof(p->name), "%s", name);
+	if (size == 0)
+		return pr_fail(p, 0, "profile too long");
+	text[0] = '\0';
+	if (text_section(p, &t, d, S_MATCH) < 0)
+		return -1;
+	text_str(&t, "\n");
+	if (text_section(p, &t, d, S_APPLY) < 0)
+		return -1;
+	if (t.full)
+		return pr_fail(p, 0, "profile too long");
+	if (profile_parse(p, name, text, t.len, 0) < 0) {
+		/* The line is one of a text the client never saw. */
+		int skip = 0;
+		if (sscanf(p->error, "line %*d: %n", &skip) == 0 && skip > 0)
+			memmove(p->error, p->error + skip, strlen(p->error + skip) + 1);
+		return -1;
+	}
+	return (int)t.len;
 }

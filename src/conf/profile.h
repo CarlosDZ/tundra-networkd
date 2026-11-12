@@ -10,6 +10,8 @@
 #define SSID_MAX 32
 #define PASSPHRASE_MAX 128
 #define DNS_MAX 3
+#define PROFILE_TEMPLATE "000-template"
+#define PROFILE_TEXT_MAX 2048
 
 enum security { SEC_NONE, SEC_OPEN, SEC_WPA2, SEC_WPA3 };
 enum address_mode { ADDR_DHCP, ADDR_STATIC };
@@ -48,10 +50,39 @@ struct profile {
 	char error[CONF_ERR_MAX];
 };
 
+enum profile_key {
+	PKEY_INTERFACE,
+	PKEY_SSID,
+	PKEY_SECURITY,
+	PKEY_PASSPHRASE,
+	PKEY_ADDRESS,
+	PKEY_GATEWAY,
+	PKEY_DNS,
+	PKEY_AUTOCONNECT,
+	PKEY_TRUSTED,
+	PKEY_MAC,
+	PKEY_COUNT
+};
+
+/* A profile asked for key by key. named: the request carries the key. len 0
+ * with named: the request says the key has no value. */
+struct profile_draft {
+	struct draft_key {
+		int named;
+		size_t len;
+		char value[PASSPHRASE_MAX + 1];
+	} key[PKEY_COUNT];
+};
+
 int conf_valid_ifname(const char *s);
 int conf_parse_mac(const char *s, struct mac_policy *out);
 int profile_name_from_file(const char *file, char name[PROFILE_NAME_MAX + 1]);
+int profile_valid_name(const char *name);
 int profile_parse(struct profile *p, const char *name, const char *text,
                   size_t len, int exposed);
+int profile_key(const char *name);
+void profile_draft_keep(struct profile_draft *d, const struct profile *old);
+int profile_build(struct profile *p, const char *name,
+                  const struct profile_draft *d, char *text, size_t size);
 
 #endif

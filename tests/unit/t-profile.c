@@ -261,7 +261,7 @@ static void test_mac(void) {
 static void test_exposure(void) {
 	CHECK(profile_parse(&p, "10-casa", WIFI_MATCH WIFI_APPLY,
 	                    strlen(WIFI_MATCH WIFI_APPLY), 1) < 0 &&
-	          has("readable by group or others"),
+	          has("readable by another group or by others"),
 	      "credentials in an exposed file");
 	const char *open =
 	    WIRED_MATCH "apply {\n address = dhcp\n" WIRED_REST "}\n";
@@ -286,7 +286,196 @@ static void test_names(void) {
 	      "interface names follow the kernel rules");
 }
 
+static struct profile_draft d;
+static char text[PROFILE_TEXT_MAX];
+
+static void draft(int k, const char *value) {
+	d.key[k].named = 1;
+	d.key[k].len = strlen(value);
+	memcpy(d.key[k].value, value, d.key[k].len + 1);
+}
+
+static void wired_draft(void) {
+	memset(&d, 0, sizeof(d));
+	draft(PKEY_INTERFACE, "enp8s0");
+	draft(PKEY_ADDRESS, "dhcp");
+	draft(PKEY_DNS, "lease");
+	draft(PKEY_AUTOCONNECT, "yes");
+	draft(PKEY_TRUSTED, "no");
+}
+
+static void wifi_draft(const char *pass) {
+	wired_draft();
+	draft(PKEY_SSID, "casa");
+	draft(PKEY_SECURITY, "wpa3");
+	if (pass)
+		draft(PKEY_PASSPHRASE, pass);
+}
+
+static int build(void) {
+	return profile_build(&p, "10-casa", &d, text, sizeof(text));
+}
+
+static void test_build(void) {
+	struct profile again;
+
+	wired_draft();
+	CHECK(build() > 0 && p.valid && strcmp(p.name, "10-casa") == 0 &&
+	          strcmp(p.interface, "enp8s0") == 0 && p.address == ADDR_DHCP &&
+	          p.dns == DNS_LEASE && p.autoconnect && !p.trusted &&
+	          !p.has_ssid && p.mac.mode == MAC_UNSET,
+	      "a wired draft builds a valid profile");
+	CHECK(strcmp(text, "match {\n\tinterface = enp8s0\n}\n\napply {\n"
+	                   "\taddress = dhcp\n\tdns = lease\n"
+	                   "\tautoconnect = yes\n\ttrusted = no\n}\n") == 0,
+	      "with the text of a profile written by hand");
+	CHECK(profile_parse(&again, "10-casa", text, strlen(text), 0) == 0 &&
+	          again.valid,
+	      "that loads as any other file");
+
+	wired_draft();
+	draft(PKEY_INTERFACE, "*");
+	draft(PKEY_ADDRESS, "192.168.1.50/24");
+	draft(PKEY_GATEWAY, "192.168.1.1");
+	draft(PKEY_DNS, "9.9.9.9,1.1.1.1");
+	draft(PKEY_MAC, "02:12:34:56:78:9a");
+	CHECK(build() > 0 && p.any_interface && p.address == ADDR_STATIC &&
+	          p.prefix == 24 && p.has_gateway && p.ndns == 2 &&
+	          p.mac.mode == MAC_FIXED,
+	      "a static draft with gateway, dns list and mac");
+
+	wifi_draft("correct horse");
+	CHECK(build() > 0 && p.has_ssid && p.security == SEC_WPA3 &&
+	          strcmp(p.passphrase, "correct horse") == 0,
+	      "a WiFi draft");
+
+	wifi_draft("a\"b\\c #d\n\x01\x7f\xc3\xa9}");
+	d.key[PKEY_SSID].len = 6;
+	memcpy(d.key[PKEY_SSID].value, "\"x\\\n#\xff", 6);
+	CHECK(build() > 0 && p.ssid_len == 6 &&
+	          memcmp(p.ssid, "\"x\\\n#\xff", 6) == 0 &&
+	          strcmp(p.passphrase, "a\"b\\c #d\n\x01\x7f\xc3\xa9}") == 0,
+	      "quotes, backslashes, newlines and any byte survive the round trip");
+	CHECK(strstr(text, "\tssid = \"\\\"x\\\\\\x0a#\xff\"\n") &&
+	          strstr(text, "\tpassphrase = \"a\\\"b\\\\c #d\\x0a\\x01\\x7f"
+	                       "\xc3\xa9}\"\n"),
+	      "escaped as the grammar asks");
+
+	char longest[PASSPHRASE_MAX + 1];
+	memset(longest, 0xc3, PASSPHRASE_MAX);
+	longest[PASSPHRASE_MAX] = '\0';
+	wifi_draft(longest);
+	CHECK(build() > 0 && strcmp(p.passphrase, longest) == 0,
+	      "a passphrase of 128 bytes outside ASCII fits");
+	memset(longest, '"', PASSPHRASE_MAX);
+	wifi_draft(longest);
+	CHECK(build() > 0 && strcmp(p.passphrase, longest) == 0,
+	      "and one of 128 quotes");
+
+	wired_draft();
+	draft(PKEY_ADDRESS, "dhcp\n\ttrusted = yes");
+	CHECK(build() < 0 && !p.valid && has("invalid value for address"),
+	      "a bare value cannot carry another line");
+	wired_draft();
+	draft(PKEY_DNS, "none #");
+	CHECK(build() < 0 && has("invalid value for dns"),
+	      "nor a comment or a space");
+	wired_draft();
+	draft(PKEY_INTERFACE, "en\"p");
+	CHECK(build() < 0 && has("invalid value for interface"), "nor a quote");
+
+	wired_draft();
+	draft(PKEY_ADDRESS, "10.0.0.1");
+	CHECK(build() < 0 && !p.valid &&
+	          strcmp(p.error, "address needs a prefix: 10.0.0.1") == 0,
+	      "the error of the parser comes without the line");
+	wired_draft();
+	memset(&d.key[PKEY_TRUSTED], 0, sizeof(d.key[0]));
+	d.key[PKEY_TRUSTED].named = 1;
+	CHECK(build() < 0 && strcmp(p.error, "missing trusted") == 0,
+	      "a key without value is a missing key");
+	wifi_draft(NULL);
+	CHECK(build() < 0 && strcmp(p.error, "missing passphrase") == 0,
+	      "a WiFi draft without passphrase is refused");
+	wifi_draft("short");
+	draft(PKEY_SECURITY, "wpa2");
+	CHECK(build() < 0 && has("wpa2 passphrase must have 8 to 63") &&
+	          !strstr(p.error, "short"),
+	      "a bad passphrase is refused without being quoted");
+	wired_draft();
+	char small[16];
+	CHECK(profile_build(&p, "10-casa", &d, small, sizeof(small)) < 0 &&
+	          has("profile too long"),
+	      "a text that does not fit is refused");
+}
+
+static void test_keep(void) {
+	struct profile old;
+	const char *tnc_old = WIFI_MATCH WIFI_APPLY;
+	profile_parse(&old, "10-casa", tnc_old, strlen(tnc_old), 0);
+
+	wifi_draft(NULL);
+	profile_draft_keep(&d, &old);
+	CHECK(build() > 0 && strcmp(p.passphrase, "correcthorsebatterystaple") == 0,
+	      "a draft without passphrase keeps the stored one");
+	wifi_draft("another one");
+	profile_draft_keep(&d, &old);
+	CHECK(build() > 0 && strcmp(p.passphrase, "another one") == 0,
+	      "one with passphrase replaces it");
+	wifi_draft(NULL);
+	d.key[PKEY_PASSPHRASE].named = 1;
+	profile_draft_keep(&d, &old);
+	CHECK(build() < 0 && has("missing passphrase"),
+	      "a passphrase named without value drops the stored one");
+	wifi_draft(NULL);
+	draft(PKEY_SECURITY, "open");
+	profile_draft_keep(&d, &old);
+	CHECK(build() > 0 && !p.has_passphrase,
+	      "a network that turns open does not keep it");
+	wired_draft();
+	profile_draft_keep(&d, &old);
+	CHECK(build() > 0 && !p.has_passphrase, "nor a wired one");
+	wifi_draft(NULL);
+	draft(PKEY_SSID, "otra");
+	profile_draft_keep(&d, &old);
+	CHECK(build() < 0 && has("missing passphrase"),
+	      "nor one that points to another network");
+	wifi_draft(NULL);
+	profile_draft_keep(&d, NULL);
+	CHECK(build() < 0 && has("missing passphrase"),
+	      "a new profile has nothing to keep");
+	old.valid = 0;
+	wifi_draft(NULL);
+	profile_draft_keep(&d, &old);
+	CHECK(build() < 0, "nor one whose stored profile has errors");
+}
+
+static void test_hostile_names(void) {
+	char longname[PROFILE_NAME_MAX + 2];
+	memset(longname, 'a', sizeof(longname) - 1);
+	longname[sizeof(longname) - 1] = '\0';
+	CHECK(profile_valid_name("10-casa") && profile_valid_name("a.b_c-D9"),
+	      "a valid profile name");
+	CHECK(!profile_valid_name("") && !profile_valid_name(".") &&
+	          !profile_valid_name("..") && !profile_valid_name(".hidden"),
+	      "empty, dot and hidden names are refused");
+	CHECK(!profile_valid_name("../casa") && !profile_valid_name("a/b") &&
+	          !profile_valid_name("/etc/passwd") &&
+	          !profile_valid_name("a b") && !profile_valid_name("a\nb") &&
+	          !profile_valid_name("caf\xc3\xa9"),
+	      "slashes, spaces, newlines and bytes outside ASCII are refused");
+	CHECK(!profile_valid_name(longname), "a name over the limit is refused");
+	longname[PROFILE_NAME_MAX] = '\0';
+	CHECK(profile_valid_name(longname), "one at the limit is valid");
+	CHECK(profile_key("ssid") == PKEY_SSID && profile_key("mac") == PKEY_MAC &&
+	          profile_key("nope") < 0 && profile_key("") < 0,
+	      "keys are found by name");
+}
+
 int main(void) {
+	test_build();
+	test_keep();
+	test_hostile_names();
 	test_valid();
 	test_structure();
 	test_required();

@@ -28,6 +28,207 @@ static int status(struct core_iface *ci, const struct profile *p, int conn,
 	return proto_status(&v, out, sizeof(out)) >= 0 && strcmp(out, want) == 0;
 }
 
+static void test_profile_commands(void) {
+	const char *usage =
+	    "ERROR usage: PROFILE-SET <profile> <key> <value> [<key> <value>]...";
+	CHECK(parsed("PROFILE casa", CMD_PROFILE, 1) &&
+	          strcmp(c.args[0], "casa") == 0,
+	      "PROFILE with a name");
+	CHECK(bad("PROFILE", "ERROR usage: PROFILE <profile>") &&
+	          bad("PROFILE a b", "ERROR usage: PROFILE <profile>"),
+	      "PROFILE takes one name");
+	CHECK(parsed("PROFILE-DELETE casa", CMD_PROFILE_DELETE, 1) &&
+	          strcmp(c.args[0], "casa") == 0,
+	      "PROFILE-DELETE with a name");
+	CHECK(bad("PROFILE-DELETE", "ERROR usage: PROFILE-DELETE <profile>"),
+	      "PROFILE-DELETE without a name");
+	CHECK(parsed("PROFILE-SET casa  interface enp8s0 address dhcp",
+	             CMD_PROFILE_SET, 1) &&
+	          strcmp(c.args[0], "casa") == 0 &&
+	          strcmp(c.rest, "  interface enp8s0 address dhcp") == 0,
+	      "PROFILE-SET keeps the name and what follows it");
+	CHECK(bad("PROFILE-SET", usage) && bad("PROFILE-SET casa", usage) &&
+	          bad("PROFILE-SET casa interface", usage),
+	      "PROFILE-SET needs a name and a pair");
+	char line[1024] = "PROFILE-SET casa passphrase ";
+	memset(line + strlen(line), 'a', 3 * PASSPHRASE_MAX);
+	CHECK(parsed(line, CMD_PROFILE_SET, 1),
+	      "a value of PROFILE-SET may be longer than a name");
+	snprintf(line, sizeof(line), "PROFILE-SET %0*d interface enp8s0",
+	         PROFILE_NAME_MAX + 1, 0);
+	CHECK(bad(line, usage), "but its name may not");
+}
+
+static int decoded(const char *in, const char *want, size_t len) {
+	char out[32];
+	return proto_decode(in, strlen(in), out, sizeof(out)) == (int)len &&
+	       memcmp(out, want, len) == 0 && out[len] == '\0';
+}
+
+static int undecoded(const char *in) {
+	char out[32];
+	return proto_decode(in, strlen(in), out, sizeof(out)) < 0;
+}
+
+static void test_decode(void) {
+	CHECK(decoded("casa", "casa", 4) &&
+	          decoded("a.b_c:d@e,f/g-h", "a.b_c:d@e,f/g-h", 15),
+	      "safe bytes decode to themselves");
+	CHECK(decoded("caf%C3%A9", "caf\xc3\xa9", 5) && decoded("%2D", "-", 1) &&
+	          decoded("a%20b%0A", "a b\n", 4) &&
+	          decoded("%c3%a9", "\xc3\xa9", 2),
+	      "escapes decode to their byte, in either case");
+	CHECK(undecoded("") && undecoded("a b") && undecoded("a*") &&
+	          undecoded("caf\xc3\xa9") && undecoded("a\"b") && undecoded("a#"),
+	      "a byte outside the safe set is refused");
+	CHECK(undecoded("%") && undecoded("a%2") && undecoded("%zz") &&
+	          undecoded("%2g") && undecoded("%%"),
+	      "a broken escape is refused");
+	CHECK(undecoded("a%00b"), "a NUL is refused");
+	char out[4];
+	CHECK(proto_decode("abc", 3, out, sizeof(out)) == 3 &&
+	          proto_decode("abcd", 4, out, sizeof(out)) < 0 &&
+	          proto_decode("a%41%41%41", 10, out, sizeof(out)) < 0,
+	      "a value that does not fit is refused");
+	unsigned char all[255];
+	char enc[3 * sizeof(all) + 1], back[sizeof(all) + 1];
+	for (size_t i = 0; i < sizeof(all); i++)
+		all[i] = (unsigned char)(i + 1);
+	int n = proto_encode(all, sizeof(all), enc, sizeof(enc));
+	CHECK(n > 0 &&
+	          proto_decode(enc, (size_t)n, back, sizeof(back)) ==
+	              (int)sizeof(all) &&
+	          memcmp(all, back, sizeof(all)) == 0,
+	      "every byte but NUL goes through encode and decode");
+}
+
+static struct profile_draft dr;
+static char derr[PROTO_ERR_MAX];
+
+static int drafted(const char *words) {
+	return proto_draft(words, &dr, derr, sizeof(derr)) == 0;
+}
+
+static int draft_fails(const char *words, const char *error) {
+	return proto_draft(words, &dr, derr, sizeof(derr)) < 0 &&
+	       strcmp(derr, error) == 0;
+}
+
+static int key_is(int k, const char *value) {
+	return dr.key[k].named && dr.key[k].len == strlen(value) &&
+	       strcmp(dr.key[k].value, value) == 0;
+}
+
+static void test_draft(void) {
+	const char *usage =
+	    "ERROR usage: PROFILE-SET <profile> <key> <value> [<key> <value>]...";
+	CHECK(drafted(" interface enp8s0 address 192.168.1.50/24 gateway "
+	              "192.168.1.1 dns 9.9.9.9,1.1.1.1 autoconnect yes\ttrusted no "
+	              "mac 02:12:34:56:78:9a") &&
+	          key_is(PKEY_INTERFACE, "enp8s0") &&
+	          key_is(PKEY_ADDRESS, "192.168.1.50/24") &&
+	          key_is(PKEY_GATEWAY, "192.168.1.1") &&
+	          key_is(PKEY_DNS, "9.9.9.9,1.1.1.1") &&
+	          key_is(PKEY_AUTOCONNECT, "yes") && key_is(PKEY_TRUSTED, "no") &&
+	          key_is(PKEY_MAC, "02:12:34:56:78:9a") &&
+	          !dr.key[PKEY_SSID].named && !dr.key[PKEY_PASSPHRASE].named,
+	      "the pairs of a wired profile");
+	CHECK(drafted("ssid caf%C3%A9 security wpa3 passphrase a%20%22b%5C") &&
+	          key_is(PKEY_SSID, "caf\xc3\xa9") &&
+	          key_is(PKEY_SECURITY, "wpa3") &&
+	          key_is(PKEY_PASSPHRASE, "a \"b\\"),
+	      "text values are decoded");
+	CHECK(drafted("interface * ssid - gateway - passphrase %2D") &&
+	          key_is(PKEY_INTERFACE, "*") && dr.key[PKEY_SSID].named &&
+	          dr.key[PKEY_SSID].len == 0 && dr.key[PKEY_GATEWAY].named &&
+	          dr.key[PKEY_GATEWAY].len == 0 && key_is(PKEY_PASSPHRASE, "-"),
+	      "the wildcard, a dash for no value and an encoded dash");
+	CHECK(draft_fails("", usage) && draft_fails("   ", usage),
+	      "no pairs at all");
+	CHECK(draft_fails("interface enp8s0 address", usage),
+	      "a key without its value");
+	CHECK(draft_fails("interface enp8s0 color red", usage) &&
+	          draft_fails("Interface enp8s0", usage) &&
+	          draft_fails("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa x", usage),
+	      "an unknown key");
+	CHECK(draft_fails("dns none dns lease", usage) &&
+	          draft_fails("ssid - ssid casa", usage),
+	      "a repeated key");
+	CHECK(
+	    draft_fails("ssid a*b", "ERROR invalid value for ssid") &&
+	        draft_fails("ssid *", "ERROR invalid value for ssid") &&
+	        draft_fails("address dhcp%00", "ERROR invalid value for address") &&
+	        draft_fails("passphrase abc%4",
+	                    "ERROR invalid value for passphrase"),
+	    "a value with a bad encoding names its key");
+	char words[640] = "passphrase ";
+	for (int i = 0; i < PASSPHRASE_MAX; i++)
+		strcat(words, "%FF");
+	CHECK(drafted(words) && dr.key[PKEY_PASSPHRASE].len == PASSPHRASE_MAX,
+	      "a passphrase of 128 encoded bytes");
+	strcat(words, "a");
+	CHECK(draft_fails(words, "ERROR invalid value for passphrase") &&
+	          !strstr(derr, "%FF"),
+	      "one byte more is refused, without the value in the answer");
+}
+
+static int detail(const struct profile *p, const char *want) {
+	char out[512];
+	return proto_profile_detail(p, out, sizeof(out)) >= 0 &&
+	       strcmp(out, want) == 0;
+}
+
+static int detail_of(const char *words, const char *want) {
+	struct profile p;
+	char text[PROFILE_TEXT_MAX];
+	return drafted(words) &&
+	       profile_build(&p, "casa", &dr, text, sizeof(text)) > 0 &&
+	       detail(&p, want);
+}
+
+static void test_detail(void) {
+	CHECK(detail_of("interface enp8s0 address dhcp dns lease autoconnect yes "
+	                "trusted no",
+	                "profile casa interface enp8s0 ssid - security - "
+	                "passphrase - address dhcp gateway - dns lease "
+	                "autoconnect yes trusted no mac -"),
+	      "the detail of a wired profile");
+	CHECK(detail_of("interface * address 192.168.1.50/24 gateway 192.168.1.1 "
+	                "dns 9.9.9.9,1.1.1.1,8.8.8.8 autoconnect no trusted yes "
+	                "mac 02:12:34:56:78:9A",
+	                "profile casa interface * ssid - security - passphrase - "
+	                "address 192.168.1.50/24 gateway 192.168.1.1 dns "
+	                "9.9.9.9,1.1.1.1,8.8.8.8 autoconnect no trusted yes mac "
+	                "02:12:34:56:78:9a"),
+	      "of a static one, with the wildcard and a fixed mac");
+	CHECK(detail_of("interface wlp3s0 ssid caf%C3%A9%20%2D security wpa3 "
+	                "passphrase top%20secret address dhcp dns none "
+	                "autoconnect yes trusted no mac random",
+	                "profile casa interface wlp3s0 ssid caf%C3%A9%20- security "
+	                "wpa3 passphrase set address dhcp gateway - dns none "
+	                "autoconnect yes trusted no mac random"),
+	      "of a WiFi one: the passphrase is only set");
+	CHECK(detail_of("interface wlp3s0 ssid - security - passphrase - address "
+	                "dhcp gateway - dns lease autoconnect yes trusted no mac -",
+	                "profile casa interface wlp3s0 ssid - security - "
+	                "passphrase - address dhcp gateway - dns lease "
+	                "autoconnect yes trusted no mac -"),
+	      "the detail of a profile without passphrase is a valid request");
+	CHECK(detail_of("interface wlp3s0 ssid cafe security open address dhcp "
+	                "dns lease autoconnect yes trusted no mac keep",
+	                "profile casa interface wlp3s0 ssid cafe security open "
+	                "passphrase - address dhcp gateway - dns lease "
+	                "autoconnect yes trusted no mac keep"),
+	      "of an open network");
+	struct profile broken = {.name = "roto", .error = "missing apply section"};
+	CHECK(detail(&broken, "profile roto invalid -- missing apply section"),
+	      "an invalid profile shows its error");
+	char small[32];
+	struct profile ok = {.name = "casa", .interface = "enp8s0", .valid = 1};
+	CHECK(proto_profile_detail(&ok, small, sizeof(small)) < 0,
+	      "a line that does not fit fails");
+}
+
 int main(void) {
 	CHECK(parsed("STATUS", CMD_STATUS, 0), "STATUS");
 	CHECK(parsed("  PROFILES  ", CMD_PROFILES, 0), "spaces around a command");
@@ -245,5 +446,9 @@ int main(void) {
 	CHECK(proto_scan_event("wlp3s0", out, sizeof(out)) >= 0 &&
 	          strcmp(out, "event scan wlp3s0") == 0,
 	      "event scan");
+	test_profile_commands();
+	test_decode();
+	test_draft();
+	test_detail();
 	return test_summary();
 }

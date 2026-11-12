@@ -1,7 +1,7 @@
 # tundra-networkd profile template. This file is never loaded: copy it to
 # /etc/tundra/network/<name>.tnc, uncomment what you need and run
 # "systemctl reload tundra-networkd". A profile that carries a passphrase
-# must be mode 0600, or it is rejected.
+# must be mode 0600, or 0640 root:tundra-network, or it is rejected.
 #
 # Every key below is required unless it says otherwise. Text values (ssid,
 # passphrase) go between double quotes, with \", \\ and \xHH escapes; every
@@ -54,7 +54,7 @@
 # 	trusted = yes
 # }
 #
-# WiFi (not supported yet by tundra-networkd 0.1):
+# WiFi:
 #
 # match {
 # 	interface = wlp3s0

@@ -1069,6 +1069,17 @@ static void reply_profiles(struct daemon *d, int client) {
 	server_send(&d->srv, client, "OK");
 }
 
+static void reply_profile(struct daemon *d, int client, const char *name) {
+	const struct profile *p = find_profile(d->cfg, name);
+	char line[REPLY_MAX];
+	if (!p || proto_profile_detail(p, line, sizeof(line)) < 0) {
+		server_send(&d->srv, client, "ERROR unknown profile");
+		return;
+	}
+	server_send(&d->srv, client, line);
+	server_send(&d->srv, client, "OK");
+}
+
 static const char *do_connect(struct daemon *d, const struct cmd *cmd) {
 	const struct profile *p = find_profile(d->cfg, cmd->args[0]);
 	const char *ifname = cmd->nargs > 1 ? cmd->args[1] : NULL;
@@ -1101,6 +1112,81 @@ static int do_reload(struct daemon *d) {
 	d->dirty = 1;
 	printf("networkd: configuration reloaded\n");
 	return 0;
+}
+
+/* The only place a path is made from a name of the socket: nothing but a
+ * valid profile name gets one. */
+static const char *profile_path(const char *name, char *path, size_t size) {
+	if (!profile_valid_name(name))
+		return "ERROR invalid profile name";
+	if (strcmp(name, PROFILE_TEMPLATE) == 0)
+		return "ERROR reserved profile name";
+	if (snprintf(path, size, "%s/%s.tnc", TUNDRA_NETWORKD_CONF_DIR, name) >=
+	    (int)size)
+		return "ERROR invalid profile name";
+	return NULL;
+}
+
+static const char *write_profile(struct daemon *d, const struct cmd *cmd,
+                                 struct profile_draft *draft,
+                                 struct profile *built, char *text, size_t size,
+                                 char *err, size_t errsize) {
+	char path[PATH_MAX];
+	const char *name = cmd->args[0];
+	const char *bad = profile_path(name, path, sizeof(path));
+	if (bad)
+		return bad;
+	if (proto_draft(cmd->rest, draft, err, errsize) < 0)
+		return err;
+	const struct profile *old = find_profile(d->cfg, name);
+	if (!old && d->cfg->n >= PROFILES_MAX)
+		return "ERROR too many profiles";
+	profile_draft_keep(draft, old);
+	int len = profile_build(built, name, draft, text, size);
+	if (len < 0) {
+		snprintf(err, errsize, "ERROR %s", built->error);
+		return err;
+	}
+	if (files_write_atomic(path, text, (size_t)len, 0600) < 0) {
+		fprintf(stderr, "networkd: cannot write %s: %s\n", path,
+		        strerror(errno));
+		return "ERROR cannot write the profile";
+	}
+	printf("networkd: profile %s written by request\n", name);
+	return NULL;
+}
+
+static const char *do_profile_set(struct daemon *d, const struct cmd *cmd,
+                                  char *err, size_t errsize) {
+	struct profile_draft draft;
+	struct profile built;
+	char text[PROFILE_TEXT_MAX];
+	const char *bad =
+	    write_profile(d, cmd, &draft, &built, text, sizeof(text), err, errsize);
+	/* All three may hold the passphrase. */
+	explicit_bzero(&draft, sizeof(draft));
+	explicit_bzero(&built, sizeof(built));
+	explicit_bzero(text, sizeof(text));
+	if (bad)
+		return bad;
+	return do_reload(d) < 0 ? "ERROR cannot read the configuration" : NULL;
+}
+
+static const char *do_profile_delete(struct daemon *d, const struct cmd *cmd) {
+	char path[PATH_MAX];
+	const char *name = cmd->args[0];
+	const char *bad = profile_path(name, path, sizeof(path));
+	if (bad)
+		return bad;
+	if (unlink(path) < 0) {
+		if (errno == ENOENT)
+			return "ERROR unknown profile";
+		fprintf(stderr, "networkd: cannot delete %s: %s\n", path,
+		        strerror(errno));
+		return "ERROR cannot delete the profile";
+	}
+	printf("networkd: profile %s deleted by request\n", name);
+	return do_reload(d) < 0 ? "ERROR cannot read the configuration" : NULL;
 }
 
 static void reply_alerts(struct daemon *d, int client) {
@@ -1216,6 +1302,7 @@ static void on_command(void *ctx, int client, const char *line) {
 	struct actions acts = {0};
 	struct cmd cmd;
 	const char *err;
+	char why[PROTO_ERR_MAX + CONF_ERR_MAX];
 	proto_parse(line, &cmd);
 	switch (cmd.type) {
 	case CMD_EMPTY:
@@ -1262,6 +1349,17 @@ static void on_command(void *ctx, int client, const char *line) {
 		return;
 	case CMD_SCAN:
 		err = do_scan(d, &cmd);
+		server_send(&d->srv, client, err ? err : "OK");
+		return;
+	case CMD_PROFILE:
+		reply_profile(d, client, cmd.args[0]);
+		return;
+	case CMD_PROFILE_SET:
+		err = do_profile_set(d, &cmd, why, sizeof(why));
+		server_send(&d->srv, client, err ? err : "OK");
+		return;
+	case CMD_PROFILE_DELETE:
+		err = do_profile_delete(d, &cmd);
 		server_send(&d->srv, client, err ? err : "OK");
 		return;
 	}

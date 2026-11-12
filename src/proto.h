@@ -8,6 +8,7 @@
 #include <stddef.h>
 
 #define PROTO_ARG_MAX 64
+#define PROTO_ERR_MAX 96
 
 enum cmd_type {
 	CMD_EMPTY,
@@ -21,6 +22,9 @@ enum cmd_type {
 	CMD_ALERT_REPLY,
 	CMD_NETWORKS,
 	CMD_SCAN,
+	CMD_PROFILE,
+	CMD_PROFILE_SET,
+	CMD_PROFILE_DELETE,
 	CMD_BAD
 };
 
@@ -28,6 +32,8 @@ struct cmd {
 	enum cmd_type type;
 	int nargs;
 	char args[2][PROTO_ARG_MAX + 1];
+	/* PROFILE-SET: what follows the name, inside the parsed line. */
+	const char *rest;
 	const char *error;
 };
 
@@ -59,5 +65,9 @@ int proto_network(const char *ifname, const struct wpa_bss *b,
 int proto_scan_event(const char *ifname, char *out, size_t size);
 const char *proto_connect_error(enum connect_result r);
 int proto_encode(const unsigned char *in, size_t len, char *out, size_t size);
+int proto_decode(const char *in, size_t len, char *out, size_t size);
+int proto_draft(const char *words, struct profile_draft *d, char *err,
+                size_t size);
+int proto_profile_detail(const struct profile *p, char *out, size_t size);
 
 #endif

@@ -74,7 +74,7 @@ eventually "dhcpc gets SIGUSR1" 3 grep -q "^$pid USR1\$" "$DHCPC_FAKE_DIR/signal
 eventually "and the subscriber gets event disconnected" 3 has_event "event disconnected $IF casa"
 eventually "STATUS shows it idle" 3 status_has "iface $IF state idle profile - address - trusted - override - alert - ssid - bssid -"
 
-check "a line too long closes the connection" sh -c "[ \"\$(printf '%0300d\n' 0 | $TOOLS/ctl '$SOCK')\" = 'ERROR line too long' ]"
+check "a line too long closes the connection" sh -c "[ \"\$(printf '%01100d\n' 0 | $TOOLS/ctl '$SOCK')\" = 'ERROR line too long' ]"
 check "several commands in one write" sh -c "[ \"\$(printf 'ALERTS\r\nALERTS\n' | $TOOLS/ctl '$SOCK' | tr '\n' ' ')\" = 'OK OK ' ]"
 # A client of an earlier check may still hold its slot when these arrive, and
 # then the server rightly turns one of them away: top up until 15 stay.

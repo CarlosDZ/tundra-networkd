@@ -50,7 +50,14 @@ A profile has a `match` section (`interface`, and `ssid` and `security` for
 WiFi) and an `apply` section (`passphrase`, `address`, `gateway`, `dns`,
 `autoconnect`, `trusted` and the optional `mac`). The template documents every
 key. A profile with an
-error is rejected on its own; one with a passphrase must be mode `0600`.
+error is rejected on its own; one with a passphrase must not be accessible to
+others, nor to a group other than the one of the daemon: `0600`, or `0640
+root:tundra-network` for one written by hand.
+
+Profiles are also created, replaced and deleted through the
+[control socket](#control-socket), with no access to the directory: the daemon
+checks the profile as it checks a file and writes it itself, as
+`<name>.tnc`, mode `0600`.
 
 `interfaces` holds one block per interface:
 
@@ -193,8 +200,16 @@ the service its own IPC namespace, closes the devices except the basic ones and
 Every child gets `TUNDRA_PARENT_PID`, the pid of the daemon: the kernel drops the
 parent-death signal when a file capability takes effect, and the child arms it
 again from that. `/usr/lib/sysusers.d/tundra-networkd.conf` creates the user and
-the `network` group. Profiles with a passphrase belong at `0640
-root:tundra-network`.
+the `network` group.
+
+The only part of the system the daemon can write is `/etc/tundra/network`
+(`ReadWritePaths`), for the profiles asked through the control socket. The
+package leaves that directory `2770 root:tundra-network`: the daemon writes its
+profiles there as `0600 tundra-network`, and one with a passphrase written by
+hand belongs at `0640 root:tundra-network`. A member of `network` never touches
+the directory: a profile name is the only part of a path that comes from the
+socket, it is limited to `[A-Za-z0-9._-]` without a leading dot, and
+`000-template` is reserved.
 
 ## Control socket
 
@@ -214,6 +229,9 @@ group does not exist). One command per line; each one answers `OK` or
 | `ALERT-REPLY <id> <option>` | One of the options the alert offers in `reply` |
 | `NETWORKS [interface]` | The last scan of each WiFi interface: a `scan` line and one `network` line per access point |
 | `SCAN [interface]` | Starts a scan; `event scan <interface>` follows when there are results |
+| `PROFILE <profile>` | One `profile` line with every key of that profile |
+| `PROFILE-SET <profile> <key> <value> [<key> <value>]...` | Creates the profile or replaces it whole, then reloads |
+| `PROFILE-DELETE <profile>` | Deletes the profile, then reloads |
 
 ```
 iface enp8s0 state connected profile casa address 10.79.0.100/24 trusted no override - alert - ssid - bssid -
@@ -226,6 +244,7 @@ event alert-closed 7 force
 scan wlp3s0 age 12
 network wlp3s0 ssid caf%C3%A9 bssid 52:54:00:12:34:56 freq 2412 signal -48 security wpa3 profile cafe
 event scan wlp3s0
+profile cafe interface wlp3s0 ssid caf%C3%A9 security wpa3 passphrase set address dhcp gateway - dns lease autoconnect no trusted no mac random
 ```
 
 `event alert-closed <id> <how>` tells every subscriber that an alert is no
@@ -242,7 +261,49 @@ looks for a network to join; `event scan` follows both.
 
 `ssid` and `bssid` close every `iface` line, `ssid` and `security` every
 `profile` line, with `-` on a cable; the ssid uses the `%XX` encoding of the
-alerts (ADR-025) and the passphrase never leaves the daemon.
+alerts (ADR-025) and the passphrase never leaves the daemon: not in an answer,
+an event or the log.
+
+`PROFILE` answers with the keys of the profile in a fixed order: `interface`,
+`ssid`, `security`, `passphrase`, `address`, `gateway`, `dns`, `autoconnect`,
+`trusted` and `mac`, with `-` for a key the profile does not have. `passphrase`
+is only `set` or `-`. A profile with an error answers as in `PROFILES`.
+
+`PROFILE-SET` takes those same keys, in any order, with the values of the
+`.tnc` format:
+
+```
+PROFILE-SET casa interface enp8s0 address 192.168.1.50/24 gateway 192.168.1.1 dns 9.9.9.9,1.1.1.1 autoconnect yes trusted yes
+PROFILE-SET cafe interface wlp3s0 ssid caf%C3%A9 security wpa3 passphrase correct%20horse address dhcp dns lease autoconnect no trusted no mac random
+```
+
+- Every value uses the `%XX` encoding: any byte outside `[A-Za-z0-9._:@,/-]`
+  goes as `%XX`, and a value that is just a dash as `%2D`. `interface *` is
+  taken as it is. Only `ssid` and `passphrase` admit any byte but NUL; the
+  other values are printable ASCII without spaces, `#` or `"`.
+- A key that is left out, or whose value is `-`, is not written. The profile
+  is replaced whole: nothing is kept from the previous one but the passphrase.
+- Without `passphrase`, a `wpa2` or `wpa3` profile keeps the passphrase it
+  had, as long as its `ssid` does not change: the interface cannot read it to
+  send it back, and a passphrase is never carried to another network.
+  `passphrase -` drops it.
+- The profile is checked as a file is, and written only if it is valid.
+  Otherwise the answer is `ERROR <reason>`, with the reason `PROFILES` would
+  show, and nothing changes.
+- A key that is unknown, repeated or without value answers `ERROR usage: …`;
+  a value with a broken encoding or a byte it does not admit, `ERROR invalid
+  value for <key>`.
+
+| Answer of `PROFILE-SET` and `PROFILE-DELETE` | Meaning |
+|-----------------------------------------------|---------|
+| `ERROR invalid profile name` | Not a profile name: 1 to 64 of `[A-Za-z0-9._-]`, without a leading dot |
+| `ERROR reserved profile name` | `000-template` |
+| `ERROR unknown profile` | `PROFILE-DELETE` of a profile without file |
+| `ERROR too many profiles` | A new profile over the limit of 64 |
+| `ERROR cannot write the profile`, `ERROR cannot delete the profile` | The directory does not let the daemon; the reason goes to the log |
+
+A line holds 1023 bytes at most; a longer one answers `ERROR line too long`
+and closes the connection.
 
 States: `idle`, `connecting`, `connected`, `stopping`, `retrying`, `waiting`,
 `unmanaged`, `off` and `blocked`, with `reason config`, `exited`, `alert` or

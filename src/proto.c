@@ -1,7 +1,12 @@
 #include "proto.h"
 
+#include <arpa/inet.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
+
+#define PROFILE_SET_USAGE                                                      \
+	"ERROR usage: PROFILE-SET <profile> <key> <value> [<key> <value>]..."
 
 static const struct {
 	const char *name;
@@ -21,11 +26,17 @@ static const struct {
      "ERROR usage: ALERT-REPLY <id> <option>"},
     {"NETWORKS", CMD_NETWORKS, 0, 1, "ERROR usage: NETWORKS [interface]"},
     {"SCAN", CMD_SCAN, 0, 1, "ERROR usage: SCAN [interface]"},
+    {"PROFILE", CMD_PROFILE, 1, 1, "ERROR usage: PROFILE <profile>"},
+    {"PROFILE-SET", CMD_PROFILE_SET, 3, INT_MAX, PROFILE_SET_USAGE},
+    {"PROFILE-DELETE", CMD_PROFILE_DELETE, 1, 1,
+     "ERROR usage: PROFILE-DELETE <profile>"},
 };
 
 void proto_parse(const char *line, struct cmd *out) {
 	char words[4][PROTO_ARG_MAX + 1];
-	int n = 0, too_long = 0;
+	const char *rest = NULL;
+	int n = 0;
+	unsigned int too_long = 0;
 	memset(out, 0, sizeof(*out));
 	for (const char *p = line; *p;) {
 		while (*p == ' ' || *p == '\t')
@@ -34,11 +45,14 @@ void proto_parse(const char *line, struct cmd *out) {
 			break;
 		size_t len = strcspn(p, " \t");
 		if (n < 4) {
-			too_long |= len > PROTO_ARG_MAX;
+			if (len > PROTO_ARG_MAX)
+				too_long |= 1u << n;
 			snprintf(words[n], sizeof(words[n]), "%.*s", (int)len, p);
 		}
 		n++;
 		p += len;
+		if (n == 2)
+			rest = p;
 	}
 	if (n == 0) {
 		out->type = CMD_EMPTY;
@@ -47,11 +61,18 @@ void proto_parse(const char *line, struct cmd *out) {
 	for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
 		if (strcmp(words[0], commands[i].name) != 0)
 			continue;
-		int nargs = n - 1;
-		if (too_long || nargs < commands[i].min || nargs > commands[i].max) {
+		int nargs = n - 1, bad = too_long != 0;
+		/* The values of PROFILE-SET have their own limit, in proto_draft. */
+		if (commands[i].type == CMD_PROFILE_SET)
+			bad = (too_long & 2u) != 0;
+		if (bad || nargs < commands[i].min || nargs > commands[i].max) {
 			out->type = CMD_BAD;
 			out->error = commands[i].usage;
 			return;
+		}
+		if (commands[i].type == CMD_PROFILE_SET) {
+			nargs = 1;
+			out->rest = rest;
 		}
 		out->type = commands[i].type;
 		out->nargs = nargs;
@@ -134,6 +155,90 @@ int proto_encode(const unsigned char *in, size_t len, char *out, size_t size) {
 	return (int)n;
 }
 
+static int hexval(char c) {
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	return -1;
+}
+
+/* The reverse of proto_encode, strict: a byte outside the safe set, a broken
+ * escape or %00 are refused. The decoded length, never 0, or -1. */
+int proto_decode(const char *in, size_t len, char *out, size_t size) {
+	size_t n = 0;
+	if (len == 0)
+		return -1;
+	for (size_t i = 0; i < len; i++) {
+		int c = (unsigned char)in[i];
+		if (c == '%') {
+			int hi = i + 1 < len ? hexval(in[i + 1]) : -1;
+			int lo = i + 2 < len ? hexval(in[i + 2]) : -1;
+			if (hi < 0 || lo < 0 || (hi | lo) == 0)
+				return -1;
+			c = hi << 4 | lo;
+			i += 2;
+		} else if (!safe((unsigned char)c)) {
+			return -1;
+		}
+		if (n + 1 >= size)
+			return -1;
+		out[n++] = (char)c;
+	}
+	out[n] = '\0';
+	return (int)n;
+}
+
+/* The "<key> <value>" pairs of PROFILE-SET. A value "-" names the key
+ * without a value, and "*" is taken as it is for the interface, as PROFILE
+ * prints it. 0, or -1 with the answer in err. */
+int proto_draft(const char *words, struct profile_draft *d, char *err,
+                size_t size) {
+	char name[16];
+	int pairs = 0;
+	memset(d, 0, sizeof(*d));
+	for (const char *p = words;; pairs++) {
+		p += strspn(p, " \t");
+		if (!*p)
+			break;
+		size_t len = strcspn(p, " \t");
+		int k = -1;
+		if (len < sizeof(name)) {
+			memcpy(name, p, len);
+			name[len] = '\0';
+			k = profile_key(name);
+		}
+		p += len;
+		p += strspn(p, " \t");
+		len = strcspn(p, " \t");
+		if (k < 0 || d->key[k].named || len == 0) {
+			snprintf(err, size, "%s", PROFILE_SET_USAGE);
+			return -1;
+		}
+		struct draft_key *v = &d->key[k];
+		v->named = 1;
+		if (len == 1 && *p == '*' && k == PKEY_INTERFACE) {
+			v->value[0] = '*';
+			v->len = 1;
+		} else if (!(len == 1 && *p == '-')) {
+			int n = proto_decode(p, len, v->value, sizeof(v->value));
+			if (n < 0) {
+				snprintf(err, size, "ERROR invalid value for %s", name);
+				return -1;
+			}
+			v->len = (size_t)n;
+		}
+		p += len;
+	}
+	if (pairs == 0) {
+		snprintf(err, size, "%s", PROFILE_SET_USAGE);
+		return -1;
+	}
+	return 0;
+}
+
 int proto_status(const struct iface_view *v, char *out, size_t size) {
 	const struct core_iface *ci = v->ci;
 	const char *lead = "", *note = NULL;
@@ -193,6 +298,53 @@ int proto_profile(const struct profile *p, char *out, size_t size) {
 		             p->autoconnect ? "yes" : "no", p->trusted ? "yes" : "no",
 		             ssid, security_name(p));
 	}
+	return fit(n, size);
+}
+
+/* Every key of a profile but the passphrase, which is only "set" or "-". */
+int proto_profile_detail(const struct profile *p, char *out, size_t size) {
+	if (!p->valid)
+		return proto_profile(p, out, size);
+	char iface[3 * IF_NAMESIZE] = "*", ssid[3 * SSID_MAX + 1] = "-";
+	char address[INET_ADDRSTRLEN + 4] = "dhcp", gateway[INET_ADDRSTRLEN] = "-";
+	char dns[DNS_MAX * INET_ADDRSTRLEN + 1] = "none", mac[3 * MAC_LEN] = "-";
+	char ip[INET_ADDRSTRLEN];
+	if (!p->any_interface &&
+	    proto_encode((const unsigned char *)p->interface, strlen(p->interface),
+	                 iface, sizeof(iface)) < 0)
+		return -1;
+	if (p->has_ssid &&
+	    proto_encode(p->ssid, p->ssid_len, ssid, sizeof(ssid)) < 0)
+		return -1;
+	if (p->address == ADDR_STATIC) {
+		inet_ntop(AF_INET, &p->ip, ip, sizeof(ip));
+		snprintf(address, sizeof(address), "%s/%d", ip, p->prefix);
+	}
+	if (p->has_gateway)
+		inet_ntop(AF_INET, &p->gateway, gateway, sizeof(gateway));
+	if (p->dns == DNS_LEASE)
+		snprintf(dns, sizeof(dns), "lease");
+	for (int i = 0, n = 0; p->dns == DNS_LIST && i < p->ndns; i++) {
+		inet_ntop(AF_INET, &p->dns_list[i], ip, sizeof(ip));
+		n += snprintf(dns + n, sizeof(dns) - (size_t)n, "%s%s", i ? "," : "",
+		              ip);
+	}
+	if (p->mac.mode == MAC_KEEP)
+		snprintf(mac, sizeof(mac), "keep");
+	else if (p->mac.mode == MAC_RANDOM)
+		snprintf(mac, sizeof(mac), "random");
+	else if (p->mac.mode == MAC_FIXED)
+		snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+		         p->mac.addr[0], p->mac.addr[1], p->mac.addr[2], p->mac.addr[3],
+		         p->mac.addr[4], p->mac.addr[5]);
+	int n =
+	    snprintf(out, size,
+	             "profile %s interface %s ssid %s security %s "
+	             "passphrase %s address %s gateway %s dns %s "
+	             "autoconnect %s trusted %s mac %s",
+	             p->name, iface, ssid, security_name(p),
+	             p->has_passphrase ? "set" : "-", address, gateway, dns,
+	             p->autoconnect ? "yes" : "no", p->trusted ? "yes" : "no", mac);
 	return fit(n, size);
 }
 

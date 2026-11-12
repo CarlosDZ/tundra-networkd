@@ -5,7 +5,9 @@
 #include <stdint.h>
 
 #define SERVER_CLIENTS 16
-#define SERVER_LINE_MAX 256
+/* The longest PROFILE-SET: a name, ten keys and a passphrase of 128 bytes
+ * with every one as %XX stay under 800 bytes. */
+#define SERVER_LINE_MAX 1024
 #define SERVER_OUT_MAX 16384
 
 struct client {

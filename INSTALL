@@ -1,5 +1,8 @@
 case "${ACTION}" in
 post)
 	systemd-sysusers tundra-networkd.conf
+	# The daemon writes the profiles asked through its control socket.
+	chown root:tundra-network etc/tundra/network
+	chmod 2770 etc/tundra/network
 	;;
 esac
